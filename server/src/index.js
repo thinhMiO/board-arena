@@ -265,6 +265,9 @@ io.on('connection', socket => {
   // Room creation
   socket.on('room:create', (payload, callback) => {
     try {
+      if (!currentUser && payload.user) {
+        currentUser = payload.user;
+      }
       const room = roomManager.createRoom({
         ...payload,
         hostUser: currentUser || payload.user
@@ -282,6 +285,9 @@ io.on('connection', socket => {
   socket.on('room:join', ({ roomCode, password, user, role }, callback) => {
     try {
       const playerUser = currentUser || user;
+      if (!currentUser && playerUser) {
+        currentUser = playerUser;
+      }
       const forceSpectate = role === 'spectator';
       const { room, role: actualRole, playerIndex } = roomManager.joinRoom(roomCode, playerUser, socket, password, forceSpectate);
       currentRoomCode = roomCode;
@@ -294,12 +300,21 @@ io.on('connection', socket => {
   });
 
   // Leave room / Leave spectator
-  socket.on('room:leave', ({ roomCode }) => {
+  socket.on('room:leave', ({ roomCode, userId }) => {
     const targetRoom = roomCode || currentRoomCode;
+    const uid = userId || currentUser?.id;
     if (targetRoom) {
-      roomManager.leaveRoom(targetRoom, currentUser?.id);
+      roomManager.leaveRoom(targetRoom, uid);
       socket.leave(targetRoom);
       if (currentRoomCode === targetRoom) currentRoomCode = null;
+    }
+  });
+
+  // Resign / Xin thua
+  socket.on('game:resign', ({ roomCode }) => {
+    const targetRoom = roomCode || currentRoomCode;
+    if (targetRoom) {
+      roomManager.handleResign(targetRoom, currentUser?.id);
     }
   });
 

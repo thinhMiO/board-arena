@@ -88,6 +88,7 @@ export const GameBoardView = ({ matchConfig, user, onExitMatch, onUserUpdated })
   ]);
   const [inputText, setInputText] = useState('');
   const [moveHistory, setMoveHistory] = useState([]);
+  const [gameOverReason, setGameOverReason] = useState(null);
 
   // Voice Chat
   const [voiceManager, setVoiceManager] = useState(null);
@@ -98,8 +99,14 @@ export const GameBoardView = ({ matchConfig, user, onExitMatch, onUserUpdated })
 
   // Handle exiting room cleanly
   const handleExitMatch = () => {
+    // If playing an active online match, confirm forfeit
+    if (mode === 'online' && roomCode && !isSpectator && gameState && !gameState.gameOver && roomData?.status === 'playing') {
+      const confirmExit = window.confirm('Trận đấu đang diễn ra! Nếu rời bàn bạn sẽ bị XỬ THUA. Bạn có chắc muốn rời không?');
+      if (!confirmExit) return;
+    }
+
     if (roomCode) {
-      socketService.emit('room:leave', { roomCode });
+      socketService.emit('room:leave', { roomCode, userId: user?.id });
     }
     if (voiceManager) {
       voiceManager.destroy();
@@ -155,8 +162,8 @@ export const GameBoardView = ({ matchConfig, user, onExitMatch, onUserUpdated })
         sound.playVictory();
       });
 
-      s.on('game:ended', ({ winnerIndex, reason }) => {
-        handleGameOver(winnerIndex, reason);
+      s.on('game:ended', ({ winnerIndex, reason, ratingDeltas }) => {
+        handleGameOver(winnerIndex, reason, ratingDeltas);
       });
 
       s.on('spectators:updated', ({ count, spectators: specList }) => {
@@ -235,11 +242,18 @@ export const GameBoardView = ({ matchConfig, user, onExitMatch, onUserUpdated })
     }
   };
 
-  const handleGameOver = (winnerIndex, reason) => {
-    sound.playVictory();
-    try {
-      confetti({ particleCount: 100, spread: 70, origin: { y: 0.6 } });
-    } catch {}
+  const handleGameOver = (winnerIndex, reason, ratingDeltas = null) => {
+    setGameOverReason(reason);
+    const isMeWinner = winnerIndex === myPlayerIndex;
+    if (isMeWinner) {
+      sound.playVictory();
+      try {
+        confetti({ particleCount: 120, spread: 80, origin: { y: 0.6 } });
+      } catch {}
+    } else if (winnerIndex !== null) {
+      sound.playMove();
+    }
+
     setGameState(prev => ({ ...prev, gameOver: true, winner: winnerIndex }));
     setClockRunning(false);
     setMessages(prev => [
@@ -249,36 +263,78 @@ export const GameBoardView = ({ matchConfig, user, onExitMatch, onUserUpdated })
 
     // Record match to database for logged in user to update Elo and Leaderboard
     if (user?.id && !isSpectator) {
-      const result = winnerIndex === myPlayerIndex ? 'win' : (winnerIndex !== null ? 'loss' : 'draw');
-      fetch('/api/matches/record', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          userId: user.id,
-          gameId,
-          result,
-          opponentName: mode === 'ai' ? `Máy AI (${difficulty})` : 'Đối Thủ',
-          reason
-        })
-      })
-      .then(res => res.json())
-      .then(data => {
-        if (data.success && data.user) {
-          localStorage.setItem('board_arena_user', JSON.stringify(data.user));
-          if (onUserUpdated) onUserUpdated(data.user);
-          const deltaSign = data.delta > 0 ? `+${data.delta}` : `${data.delta}`;
-          setMessages(prev => [
-            ...prev,
-            {
-              id: Date.now().toString(),
-              sender: 'HỆ THỐNG',
-              isSystem: true,
-              text: `📈 Điểm Elo: ${data.newRating} (${deltaSign} Elo) • Đã cập nhật Bảng Xếp Hạng!`
+      if (mode === 'online') {
+        if (ratingDeltas && ratingDeltas[user.id] !== undefined) {
+          const delta = ratingDeltas[user.id];
+          const deltaSign = delta > 0 ? `+${delta}` : `${delta}`;
+          fetch('/api/auth/me', {
+            headers: {
+              'Authorization': `Bearer ${localStorage.getItem('board_arena_token') || ''}`
             }
-          ]);
+          })
+          .then(res => res.json())
+          .then(updatedUser => {
+            if (updatedUser && !updatedUser.error) {
+              localStorage.setItem('board_arena_user', JSON.stringify(updatedUser));
+              if (onUserUpdated) onUserUpdated(updatedUser);
+              const newRating = (updatedUser.ratings && updatedUser.ratings[gameId]) || 1500;
+              setMessages(prev => [
+                ...prev,
+                {
+                  id: Date.now().toString(),
+                  sender: 'HỆ THỐNG',
+                  isSystem: true,
+                  text: `📈 Điểm Elo: ${newRating} (${deltaSign} Elo) • Đã cập nhật Bảng Xếp Hạng!`
+                }
+              ]);
+            }
+          })
+          .catch(() => {});
         }
-      })
-      .catch(() => {});
+      } else {
+        const result = winnerIndex === myPlayerIndex ? 'win' : (winnerIndex !== null ? 'loss' : 'draw');
+        fetch('/api/matches/record', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            userId: user.id,
+            gameId,
+            result,
+            opponentName: mode === 'ai' ? `Máy AI (${difficulty})` : 'Đối Thủ',
+            reason
+          })
+        })
+        .then(res => res.json())
+        .then(data => {
+          if (data.success && data.user) {
+            localStorage.setItem('board_arena_user', JSON.stringify(data.user));
+            if (onUserUpdated) onUserUpdated(data.user);
+            const deltaSign = data.delta > 0 ? `+${data.delta}` : `${data.delta}`;
+            setMessages(prev => [
+              ...prev,
+              {
+                id: Date.now().toString(),
+                sender: 'HỆ THỐNG',
+                isSystem: true,
+                text: `📈 Điểm Elo: ${data.newRating} (${deltaSign} Elo) • Đã cập nhật Bảng Xếp Hạng!`
+              }
+            ]);
+          }
+        })
+        .catch(() => {});
+      }
+    }
+  };
+
+  const handleResign = () => {
+    if (gameState?.gameOver) return;
+    const confirmResign = window.confirm('Bạn có chắc chắn muốn xin hàng (chịu thua) ván cờ này không?');
+    if (!confirmResign) return;
+
+    if (mode === 'online' && roomCode) {
+      socketService.emit('game:resign', { roomCode });
+    } else {
+      handleGameOver(1 - myPlayerIndex, 'Người chơi đã chịu thua (Resign).');
     }
   };
 
@@ -539,10 +595,23 @@ export const GameBoardView = ({ matchConfig, user, onExitMatch, onUserUpdated })
           {/* ACTIVE TURN HUD BANNER */}
           <div className="w-[min(86vw,min(68vh,500px))] mb-1.5">
             {gameState?.gameOver ? (
-              <div className="p-2.5 rounded-2xl bg-gradient-to-r from-amber-500/20 via-yellow-500/30 to-amber-500/20 border-2 border-amber-400 text-center shadow-xl">
-                <span className="text-xs sm:text-sm font-black text-amber-200 uppercase tracking-wide">
-                  🏆 Trận Đấu Đã Kết Thúc
-                </span>
+              <div className={`p-3 rounded-2xl border-2 text-center shadow-xl animate-fade-in ${
+                gameState.winner === myPlayerIndex
+                  ? 'bg-gradient-to-r from-emerald-950/80 via-amber-950/70 to-emerald-950/80 border-emerald-400'
+                  : (gameState.winner !== null ? 'bg-gradient-to-r from-red-950/80 via-slate-900 to-red-950/80 border-red-500' : 'bg-slate-900/80 border-amber-400')
+              }`}>
+                <div className="text-sm sm:text-base font-black text-amber-300 flex items-center justify-center gap-2">
+                  {gameState.winner === myPlayerIndex
+                    ? '🎉 BẠN ĐÃ CHIẾN THẮNG!'
+                    : (gameState.winner !== null
+                        ? (isSpectator ? `🏆 ${roomData?.players?.[gameState.winner]?.displayName || 'Người chơi'} CHIẾN THẮNG` : '🏆 ĐỐI THỦ CHIẾN THẮNG')
+                        : '🤝 HÒA CỜ')}
+                </div>
+                {gameOverReason && (
+                  <div className="text-xs text-slate-300 font-medium mt-1">
+                    {gameOverReason}
+                  </div>
+                )}
               </div>
             ) : isSpectator ? (
               <div className="px-3 py-2 rounded-2xl bg-gradient-to-r from-red-950/90 via-slate-900 to-amber-950/90 border-2 border-red-500/70 shadow-xl flex items-center justify-between">
@@ -833,7 +902,7 @@ export const GameBoardView = ({ matchConfig, user, onExitMatch, onUserUpdated })
             ) : (
               <>
                 <button
-                  onClick={() => handleGameOver(1 - myPlayerIndex, 'Người chơi đã chịu thua (Resign).')}
+                  onClick={handleResign}
                   disabled={gameState?.gameOver}
                   className="flex-1 py-2 rounded-xl bg-slate-800 hover:bg-red-900/60 hover:text-red-300 text-slate-300 font-bold text-xs flex items-center justify-center gap-1.5 border border-slate-700 transition-colors disabled:opacity-40"
                 >

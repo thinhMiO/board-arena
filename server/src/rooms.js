@@ -219,6 +219,7 @@ export class RoomManager {
     const room = this.rooms.get(roomCode);
     if (!room || !userId) return;
 
+    // Check if spectator
     const specIdx = room.spectators.findIndex(s => s.id === userId);
     if (specIdx !== -1) {
       room.spectators.splice(specIdx, 1);
@@ -227,7 +228,63 @@ export class RoomManager {
         spectators: room.spectators
       });
       this.io.to(roomCode).emit('room:updated', this.sanitizeRoom(room));
+      return;
     }
+
+    // Check if player
+    const playerIndex = room.players.findIndex(p => p.id === userId);
+    if (playerIndex !== -1) {
+      const leavingPlayer = room.players[playerIndex];
+      const playerName = leavingPlayer?.displayName || 'Người chơi';
+
+      // 1. If game is currently playing and not yet over -> Forfeit leaver and award victory to remaining player
+      if (room.status === 'playing' && (!room.gameState || !room.gameState.gameOver)) {
+        const winnerIndex = (playerIndex === 0) ? 1 : 0;
+        const winnerPlayer = room.players[winnerIndex];
+        const winnerName = winnerPlayer?.displayName || 'Người chơi còn lại';
+
+        this.broadcastSystemMessage(
+          roomCode,
+          `🚪 ${playerName} đã rời khỏi bàn đấu! ${winnerName} giành chiến thắng!`
+        );
+
+        this.endGame(roomCode, winnerIndex, `${playerName} đã rời khỏi bàn đấu (Xử thua).`);
+      } else if (room.status === 'waiting') {
+        // Room was waiting for players
+        room.players.splice(playerIndex, 1);
+        this.broadcastSystemMessage(roomCode, `👋 ${playerName} đã rời phòng chờ.`);
+        if (room.players.length === 0 && room.spectators.length === 0 && !room.isDemo) {
+          this.rooms.delete(roomCode);
+          this.io.emit('lobby:room_removed', roomCode);
+        } else {
+          this.io.to(roomCode).emit('room:updated', this.sanitizeRoom(room));
+        }
+      } else if (room.status === 'ended') {
+        // Player leaves after match ended
+        room.players.splice(playerIndex, 1);
+        if (room.players.length === 0 && room.spectators.length === 0 && !room.isDemo) {
+          this.rooms.delete(roomCode);
+          this.io.emit('lobby:room_removed', roomCode);
+        } else {
+          this.io.to(roomCode).emit('room:updated', this.sanitizeRoom(room));
+        }
+      }
+    }
+  }
+
+  handleResign(roomCode, userId) {
+    const room = this.rooms.get(roomCode);
+    if (!room || room.status !== 'playing' || (room.gameState && room.gameState.gameOver)) return;
+
+    const playerIndex = room.players.findIndex(p => p.id === userId);
+    if (playerIndex === -1) return;
+
+    const winnerIndex = (playerIndex === 0) ? 1 : 0;
+    const resignPlayer = room.players[playerIndex]?.displayName || 'Người chơi';
+    const winnerPlayer = room.players[winnerIndex]?.displayName || 'Đối thủ';
+
+    this.broadcastSystemMessage(roomCode, `🏳️ ${resignPlayer} đã xin hàng (Chịu thua). ${winnerPlayer} giành chiến thắng!`);
+    this.endGame(roomCode, winnerIndex, `${resignPlayer} đã xin hàng (Chịu thua).`);
   }
 
   startDemoSimulationLoop() {
@@ -343,6 +400,10 @@ export class RoomManager {
 
     room.status = 'ended';
     room.timer.running = false;
+    if (room.gameState) {
+      room.gameState.gameOver = true;
+      room.gameState.winner = winnerIndex;
+    }
 
     let winnerId = null;
     let ratingDeltas = null;
@@ -357,6 +418,11 @@ export class RoomManager {
       const p2 = db.findUserById(room.players[1].id);
 
       if (p1 && p2 && !p1.isBot && !p2.isBot) {
+        if (!p1.ratings) p1.ratings = {};
+        if (!p1.stats) p1.stats = { wins: 0, losses: 0, draws: 0, streak: 0, xp: 0, level: 1 };
+        if (!p2.ratings) p2.ratings = {};
+        if (!p2.stats) p2.stats = { wins: 0, losses: 0, draws: 0, streak: 0, xp: 0, level: 1 };
+
         const r1 = (p1.ratings && p1.ratings[room.gameId]) || 1500;
         const r2 = (p2.ratings && p2.ratings[room.gameId]) || 1500;
         const score1 = winnerIndex === 0 ? 1 : (winnerIndex === 1 ? 0 : 0.5);
@@ -377,6 +443,9 @@ export class RoomManager {
           p2.stats.draws++; p2.stats.xp += 50;
         }
 
+        p1.stats.level = Math.max(1, Math.floor(p1.stats.xp / 1000) + 1);
+        p2.stats.level = Math.max(1, Math.floor(p2.stats.xp / 1000) + 1);
+
         db.updateUser(p1.id, { ratings: p1.ratings, stats: p1.stats });
         db.updateUser(p2.id, { ratings: p2.ratings, stats: p2.stats });
 
@@ -396,8 +465,8 @@ export class RoomManager {
       winnerId,
       reason,
       ratingDeltas,
-      totalMoves: room.replay.history.length,
-      replayData: room.replay.exportJson()
+      totalMoves: room.replay ? room.replay.history.length : 0,
+      replayData: room.replay ? room.replay.exportJson() : null
     });
 
     this.broadcastSystemMessage(roomCode, `🏆 Kết thúc ván cờ: ${reason}`);
