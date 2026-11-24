@@ -6,7 +6,7 @@ import { VoiceChatManager } from '../services/webrtc';
 import { socketService } from '../services/socket';
 import {
   ArrowLeft, Mic, MicOff, Volume2, VolumeX, MessageSquare, Flag,
-  RotateCcw, History, Copy, Check, Send, Smile, Users, Radio, BookOpen, Eye, Share2
+  RotateCcw, History, Copy, Check, Send, Smile, Users, Radio, BookOpen, Eye, Share2, Play
 } from 'lucide-react';
 import { GameGuideModal } from './GameGuideModal';
 import confetti from 'canvas-confetti';
@@ -50,6 +50,10 @@ export const GameBoardView = ({ matchConfig, user, onExitMatch, onUserUpdated })
 
   // Match State
   const [gameState, setGameState] = useState(() => {
+    // If waiting for opponent in online room, ALWAYS use clean initial game state!
+    if (mode === 'online' && (!matchConfig?.room || matchConfig.room.status === 'waiting')) {
+      return game ? game.init() : null;
+    }
     if (matchConfig?.room?.gameState) return matchConfig.room.gameState;
     return game ? game.init() : null;
   });
@@ -61,6 +65,9 @@ export const GameBoardView = ({ matchConfig, user, onExitMatch, onUserUpdated })
     return 0;
   });
   const [roomCode, setRoomCode] = useState(initialRoomCode || null);
+
+  const isWaitingForOpponent = mode === 'online' && !isSpectator && (!roomData?.players || roomData.players.length < 2 || roomData?.status === 'waiting');
+
   const [activeTab, setActiveTab] = useState('chat'); // 'chat' | 'history' | 'voice'
   const [isCopied, setIsCopied] = useState(false);
   const [isLinkCopied, setIsLinkCopied] = useState(false);
@@ -68,12 +75,15 @@ export const GameBoardView = ({ matchConfig, user, onExitMatch, onUserUpdated })
 
   // Clocks
   const [clocks, setClocks] = useState(() => {
-    if (matchConfig?.room?.timer?.clocks) {
-      return matchConfig.room.timer.clocks;
-    }
-    return { 0: 600, 1: 600 };
+    const t = matchConfig?.room?.timer;
+    return t?.times || t?.clocks || { 0: 600, 1: 600 };
   });
-  const [clockRunning, setClockRunning] = useState(false);
+  const [clockRunning, setClockRunning] = useState(() => {
+    if (mode === 'online') {
+      return matchConfig?.room?.status === 'playing';
+    }
+    return true; // Start clock in AI / local mode
+  });
 
   // Chat & History
   const [messages, setMessages] = useState(() => [
@@ -96,6 +106,55 @@ export const GameBoardView = ({ matchConfig, user, onExitMatch, onUserUpdated })
   const [isVoiceActive, setIsVoiceActive] = useState(false);
   const [voiceRoster, setVoiceRoster] = useState([]);
   const [activeSpeakers, setActiveSpeakers] = useState(new Set());
+
+  // Online Friends to Invite directly
+  const [friendsList, setFriendsList] = useState([]);
+  const [onlineFriendsMap, setOnlineFriendsMap] = useState({});
+  const [invitedFriends, setInvitedFriends] = useState(new Set());
+
+  // Fetch friends list and check online status when waiting for opponent
+  useEffect(() => {
+    if (isWaitingForOpponent && user?.id) {
+      fetch(`/api/users/${user.id}/friends`)
+        .then(res => res.json())
+        .then(data => {
+          if (Array.isArray(data)) {
+            setFriendsList(data);
+            const friendIds = data.map(f => f.id);
+            socketService.emit('friends:check_online', { friendIds }, map => {
+              if (map) setOnlineFriendsMap(map);
+            });
+          }
+        })
+        .catch(() => {});
+    }
+  }, [isWaitingForOpponent, user?.id]);
+
+  // Listen to dynamic friend online/offline changes
+  useEffect(() => {
+    const s = socketService.getSocket();
+    const handleOnlineStatus = ({ userId, isOnline }) => {
+      setOnlineFriendsMap(prev => ({ ...prev, [userId]: isOnline }));
+    };
+    s.on('users:online_status', handleOnlineStatus);
+    return () => s.off('users:online_status', handleOnlineStatus);
+  }, []);
+
+  const handleInviteOnlineFriend = (friend) => {
+    socketService.emit('friend:invite', {
+      toUserId: friend.id,
+      roomCode,
+      gameId,
+      gameName: game?.nameVi || 'Bàn Cờ'
+    }, res => {
+      if (res?.success) {
+        sound.playCheck();
+        setInvitedFriends(prev => new Set([...prev, friend.id]));
+      } else {
+        alert(res?.error || 'Không thể gửi lời mời lúc này');
+      }
+    });
+  };
 
   // Handle exiting room cleanly
   const handleExitMatch = () => {
@@ -128,21 +187,27 @@ export const GameBoardView = ({ matchConfig, user, onExitMatch, onUserUpdated })
     }
   }, [gameState, mode]);
 
-  // Timer loop
+  // Timer loop: counts down each second for the player whose turn it is
   useEffect(() => {
-    if (!clockRunning || (gameState && gameState.gameOver)) return;
+    const isPlaying = (mode === 'online' ? roomData?.status === 'playing' : clockRunning) && gameState && !gameState.gameOver && !isWaitingForOpponent;
+    if (!isPlaying) return;
+
     const interval = setInterval(() => {
       setClocks(prev => {
-        const active = gameState.turn;
-        const nextTime = Math.max(0, prev[active] - 1);
+        const active = gameState.turn ?? 0;
+        const currentSecs = prev[active] ?? prev[String(active)] ?? 600;
+        const nextTime = Math.max(0, currentSecs - 1);
         if (nextTime === 0 && !gameState.gameOver) {
-          handleGameOver(1 - active, 'Hết thời gian thi đấu!');
+          if (mode !== 'online') {
+            handleGameOver(1 - active, 'Hết thời gian thi đấu!');
+          }
         }
-        return { ...prev, [active]: nextTime };
+        return { ...prev, [active]: nextTime, [String(active)]: nextTime };
       });
     }, 1000);
+
     return () => clearInterval(interval);
-  }, [clockRunning, gameState]);
+  }, [mode, roomData?.status, clockRunning, gameState?.turn, gameState?.gameOver, isWaitingForOpponent]);
 
   // Socket room listeners
   useEffect(() => {
@@ -150,20 +215,39 @@ export const GameBoardView = ({ matchConfig, user, onExitMatch, onUserUpdated })
       const s = socketService.getSocket();
       s.on('game:move_made', ({ move, notation, playerIndex, gameState: newGs, timer }) => {
         setGameState(newGs);
-        if (timer?.clocks) setClocks(timer.clocks);
+        if (timer) {
+          const incoming = timer.times || timer.clocks;
+          if (incoming) setClocks(incoming);
+        }
+        setClockRunning(true);
         setMoveHistory(prev => [...prev, { ply: prev.length + 1, notation }]);
-        sound.playMove();
+        if (newGs.inCheck) {
+          sound.playCheck();
+        } else {
+          sound.playMove();
+        }
       });
 
       s.on('game:started', ({ gameState: startGs, timer }) => {
         setGameState(startGs);
-        if (timer?.clocks) setClocks(timer.clocks);
+        if (timer) {
+          const incoming = timer.times || timer.clocks;
+          if (incoming) setClocks(incoming);
+        }
+        setClockRunning(true);
         setMoveHistory([]);
         sound.playVictory();
       });
 
       s.on('game:ended', ({ winnerIndex, reason, ratingDeltas }) => {
+        setClockRunning(false);
         handleGameOver(winnerIndex, reason, ratingDeltas);
+      });
+
+      s.on('timer:sync', timerData => {
+        if (!timerData) return;
+        const incoming = timerData.times || timerData.clocks;
+        if (incoming) setClocks(incoming);
       });
 
       s.on('spectators:updated', ({ count, spectators: specList }) => {
@@ -173,8 +257,21 @@ export const GameBoardView = ({ matchConfig, user, onExitMatch, onUserUpdated })
       s.on('room:updated', updatedRoom => {
         setRoomData(updatedRoom);
         if (updatedRoom.spectators) setSpectators(updatedRoom.spectators);
-        if (updatedRoom.gameState) setGameState(updatedRoom.gameState);
-        if (updatedRoom.timer?.clocks) setClocks(updatedRoom.timer.clocks);
+        // While waiting for opponent, ALWAYS enforce brand new untouched board!
+        if (updatedRoom.status === 'waiting') {
+          setGameState(game.init());
+          setMoveHistory([]);
+          setClockRunning(false);
+        } else if (updatedRoom.gameState) {
+          setGameState(updatedRoom.gameState);
+        }
+        if (updatedRoom.status === 'playing') {
+          setClockRunning(true);
+        }
+        if (updatedRoom.timer) {
+          const incoming = updatedRoom.timer.times || updatedRoom.timer.clocks;
+          if (incoming) setClocks(incoming);
+        }
       });
 
       s.on('chat:message', msg => {
@@ -188,6 +285,7 @@ export const GameBoardView = ({ matchConfig, user, onExitMatch, onUserUpdated })
         s.off('spectators:updated');
         s.off('room:updated');
         s.off('chat:message');
+        s.off('timer:sync');
       };
     }
   }, [mode, roomCode]);
@@ -220,7 +318,7 @@ export const GameBoardView = ({ matchConfig, user, onExitMatch, onUserUpdated })
   };
 
   const executeMove = (move, playerIndex) => {
-    if (!game || !gameState || gameState.gameOver) return;
+    if (!game || !gameState || gameState.gameOver || isWaitingForOpponent) return;
 
     if (mode === 'online' && roomCode) {
       socketService.emit('game:move', { roomCode, move });
@@ -234,7 +332,11 @@ export const GameBoardView = ({ matchConfig, user, onExitMatch, onUserUpdated })
       const notation = game.formatMove(move, res.nextState);
       setMoveHistory(prev => [...prev, { ply: prev.length + 1, notation }]);
       setClockRunning(true);
-      sound.playMove();
+      if (res.nextState.inCheck) {
+        sound.playCheck();
+      } else {
+        sound.playMove();
+      }
 
       if (res.result && res.result.over) {
         handleGameOver(res.result.winner, res.result.reason);
@@ -368,8 +470,10 @@ export const GameBoardView = ({ matchConfig, user, onExitMatch, onUserUpdated })
   };
 
   const formatTime = seconds => {
-    const m = Math.floor(seconds / 60);
-    const s = seconds % 60;
+    if (seconds === undefined || seconds === null || isNaN(seconds)) return '10:00';
+    const total = Math.max(0, Math.floor(seconds));
+    const m = Math.floor(total / 60);
+    const s = total % 60;
     return `${m}:${s < 10 ? '0' : ''}${s}`;
   };
 
@@ -390,8 +494,6 @@ export const GameBoardView = ({ matchConfig, user, onExitMatch, onUserUpdated })
     setTimeout(() => setIsLinkCopied(false), 2500);
   };
 
-  const isWaitingForOpponent = mode === 'online' && !isSpectator && (!roomData?.players || roomData.players.length < 2 || roomData?.status === 'waiting');
-
   const player0 = isSpectator
     ? (roomData?.players?.[0] || { displayName: 'Người chơi 1 (Đỏ/Trắng)', avatar: 'https://api.dicebear.com/7.x/avataaars/svg?seed=p1', rating: 1500 })
     : (user || { displayName: 'Bạn', avatar: 'https://api.dicebear.com/7.x/bottts/svg?seed=user', rating: 1500 });
@@ -401,6 +503,19 @@ export const GameBoardView = ({ matchConfig, user, onExitMatch, onUserUpdated })
     : (mode === 'ai'
         ? { displayName: `AI (${difficulty})`, avatar: null, rating: 1500 }
         : (matchConfig?.opponent || roomData?.players?.find(p => p.id !== user?.id) || { displayName: 'Đối Thủ', avatar: 'https://api.dicebear.com/7.x/avataaars/svg?seed=opponent', rating: 1500 }));
+
+  // Precise Voice Status for Opponent and Myself
+  const opponentVoice = voiceRoster.find(
+    r => (player1?.id && (r.userId === player1.id || r.id === player1.id)) ||
+         (player1?.displayName && r.displayName === player1.displayName)
+  );
+  const isOpponentVoiceConnected = Boolean(opponentVoice);
+  const isOpponentMuted = opponentVoice ? opponentVoice.muted : false;
+  const isOpponentSpeaking = opponentVoice ? Boolean(opponentVoice.speaking) : (opponentVoice?.peerId ? activeSpeakers.has(opponentVoice.peerId) : false);
+
+  const isMyVoiceConnected = isVoiceActive;
+  const isMyMuted = isMicMuted;
+  const isMySpeaking = activeSpeakers.has('me');
 
   return (
     <div className="min-h-[calc(100vh-65px)] flex flex-col p-2 sm:p-4 max-w-7xl mx-auto">
@@ -436,6 +551,29 @@ export const GameBoardView = ({ matchConfig, user, onExitMatch, onUserUpdated })
 
         {/* Room Code Share & Spectator Counter */}
         <div className="flex items-center gap-2">
+          {mode === 'online' && !isSpectator && (
+            <button
+              onClick={handleToggleVoice}
+              title={isVoiceActive ? 'Voice đang bật (Bấm để tắt)' : 'Bấm để bật Voice Chat trực tiếp'}
+              className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl text-xs font-bold transition-all border ${
+                isVoiceActive
+                  ? (isMySpeaking
+                      ? 'bg-emerald-500 text-black border-emerald-300 ring-2 ring-emerald-400/50 shadow-lg'
+                      : (isMicMuted
+                          ? 'bg-red-500/20 text-red-300 border-red-500/40'
+                          : 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40'))
+                  : 'bg-slate-800 text-slate-400 border-slate-700 hover:text-white'
+              }`}
+            >
+              {isVoiceActive ? (
+                isMicMuted ? <MicOff className="w-3.5 h-3.5" /> : <Mic className="w-3.5 h-3.5 text-emerald-400" />
+              ) : (
+                <Mic className="w-3.5 h-3.5" />
+              )}
+              <span>{isVoiceActive ? (isMicMuted ? 'Mic Đang Tắt' : 'Voice Đang Bật') : 'Bật Voice'}</span>
+            </button>
+          )}
+
           {isSpectator && (
             <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-red-500/10 border border-red-500/30 text-red-400 text-xs font-bold">
               <span className="w-2 h-2 rounded-full bg-red-500 animate-ping" />
@@ -496,25 +634,68 @@ export const GameBoardView = ({ matchConfig, user, onExitMatch, onUserUpdated })
                     <img
                       src={player1.avatar}
                       alt={player1.displayName}
-                      className={`w-9 h-9 rounded-full border-2 ${gameState?.turn === 1 ? 'border-amber-400 ring-2 ring-amber-400/40' : 'border-slate-700'}`}
+                      className={`w-9 h-9 rounded-full border-2 transition-all ${
+                        isOpponentSpeaking
+                          ? 'border-emerald-400 ring-4 ring-emerald-400/60 shadow-[0_0_15px_rgba(52,211,153,0.8)] scale-105'
+                          : (gameState?.turn === 1 ? 'border-amber-400 ring-2 ring-amber-400/40' : 'border-slate-700')
+                      }`}
                     />
                   ) : (
-                    <div className={`w-9 h-9 rounded-full bg-slate-800 border-2 flex items-center justify-center font-bold text-sm ${gameState?.turn === 1 ? 'border-amber-400 ring-2 ring-amber-400/40' : 'border-slate-700'}`}>
+                    <div className={`w-9 h-9 rounded-full bg-slate-800 border-2 flex items-center justify-center font-bold text-sm transition-all ${
+                      isOpponentSpeaking
+                        ? 'border-emerald-400 ring-4 ring-emerald-400/60 shadow-[0_0_15px_rgba(52,211,153,0.8)] scale-105'
+                        : (gameState?.turn === 1 ? 'border-amber-400 ring-2 ring-amber-400/40' : 'border-slate-700')
+                    }`}>
                       {player1.avatar || (mode === 'ai' ? '🤖' : '👤')}
                     </div>
                   )}
-                  {activeSpeakers.has('opponent') && (
-                    <span className="absolute -bottom-1 -right-1 w-3.5 h-3.5 rounded-full bg-emerald-500 animate-ping" />
+                  {isOpponentSpeaking && (
+                    <span className="absolute -bottom-1 -right-1 w-3.5 h-3.5 rounded-full bg-emerald-500 ring-2 ring-black animate-ping" />
                   )}
                 </div>
                 <div>
-                  <div className="flex items-center gap-1.5">
+                  <div className="flex items-center gap-1.5 flex-wrap">
                     <span className="text-xs font-bold text-white">
                       {player1.displayName}
                     </span>
                     <span className="text-[10px] font-bold px-1.5 py-0.2 rounded bg-slate-800 text-slate-300 border border-slate-700">
                       {getSideName(gameId, 1)}
                     </span>
+                    {/* Opponent Voice Status Indicator */}
+                    {isOpponentVoiceConnected ? (
+                      <span className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[10px] font-bold border transition-all ${
+                        isOpponentSpeaking
+                          ? 'bg-emerald-500/20 text-emerald-300 border-emerald-400 shadow-[0_0_10px_rgba(52,211,153,0.6)] animate-pulse'
+                          : (isOpponentMuted
+                              ? 'bg-red-500/10 text-red-400 border-red-500/30'
+                              : 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30')
+                      }`}>
+                        {isOpponentSpeaking ? (
+                          <>
+                            <span className="flex items-end gap-0.5 h-2.5 px-0.5">
+                              <span className="w-0.5 h-1.5 bg-emerald-400 animate-bounce" style={{ animationDelay: '0ms' }} />
+                              <span className="w-0.5 h-2.5 bg-emerald-400 animate-bounce" style={{ animationDelay: '150ms' }} />
+                              <span className="w-0.5 h-1.5 bg-emerald-400 animate-bounce" style={{ animationDelay: '300ms' }} />
+                            </span>
+                            <span>Đang nói...</span>
+                          </>
+                        ) : isOpponentMuted ? (
+                          <>
+                            <MicOff className="w-2.5 h-2.5 text-red-400" />
+                            <span>Tắt mic</span>
+                          </>
+                        ) : (
+                          <>
+                            <Mic className="w-2.5 h-2.5 text-emerald-400" />
+                            <span>Bật mic</span>
+                          </>
+                        )}
+                      </span>
+                    ) : (
+                      <span className="text-[9px] text-slate-500 font-medium flex items-center gap-0.5">
+                        <MicOff className="w-2.5 h-2.5" /> Chưa bật voice
+                      </span>
+                    )}
                   </div>
                   <div className="text-[10px] text-slate-400">
                     Rating: {player1.rating || 1500}
@@ -530,7 +711,7 @@ export const GameBoardView = ({ matchConfig, user, onExitMatch, onUserUpdated })
               </span>
             ) : (
               <div className={`px-3 py-1 rounded-lg font-mono font-bold text-sm ${gameState?.turn === 1 ? 'bg-amber-500 text-black animate-pulse-fast' : 'bg-slate-900 text-slate-300'}`}>
-                {formatTime(clocks[1])}
+                {formatTime(clocks[1] ?? clocks['1'])}
               </div>
             )}
           </div>
@@ -589,6 +770,94 @@ export const GameBoardView = ({ matchConfig, user, onExitMatch, onUserUpdated })
                   <span>{isLinkCopied ? 'Đã Sao Chép Link!' : 'Sao Chép Link Mời Bạn Bè'}</span>
                 </button>
               </div>
+
+              {/* Online Friends List to Invite Directly */}
+              {friendsList.length > 0 && (
+                <div className="mt-4 pt-3 border-t border-slate-800 text-left">
+                  <div className="flex items-center justify-between text-xs font-bold text-slate-300 mb-2">
+                    <span className="flex items-center gap-1.5">
+                      <Users className="w-3.5 h-3.5 text-amber-400" />
+                      <span>Bạn Bè Đang Online ({friendsList.filter(f => onlineFriendsMap[f.id]).length})</span>
+                    </span>
+                    <span className="text-[10px] text-slate-500 font-normal">Bấm "Mời Ngay" để gửi lời mời trực tiếp</span>
+                  </div>
+
+                  <div className="space-y-1.5 max-h-40 overflow-y-auto pr-1">
+                    {friendsList.map(friend => {
+                      const isOnline = Boolean(onlineFriendsMap[friend.id]);
+                      const isInvited = invitedFriends.has(friend.id);
+                      return (
+                        <div
+                          key={friend.id}
+                          className="flex items-center justify-between p-2 rounded-xl bg-slate-900/80 border border-slate-800 text-xs"
+                        >
+                          <div className="flex items-center gap-2">
+                            <div className="relative">
+                              <img
+                                src={friend.avatar || 'https://api.dicebear.com/7.x/bottts/svg?seed=friend'}
+                                alt={friend.displayName}
+                                className="w-7 h-7 rounded-full bg-slate-800"
+                              />
+                              <span className={`absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full border border-slate-900 ${
+                                isOnline ? 'bg-emerald-500 animate-pulse' : 'bg-slate-600'
+                              }`} />
+                            </div>
+                            <div>
+                              <div className="font-bold text-white text-[11px] flex items-center gap-1">
+                                {friend.displayName}
+                                {isOnline ? (
+                                  <span className="text-[9px] text-emerald-400 font-bold px-1 bg-emerald-500/10 rounded">Online</span>
+                                ) : (
+                                  <span className="text-[9px] text-slate-500">Offline</span>
+                                )}
+                              </div>
+                            </div>
+                          </div>
+
+                          <button
+                            onClick={() => handleInviteOnlineFriend(friend)}
+                            disabled={!isOnline || isInvited}
+                            className={`px-2.5 py-1 rounded-lg text-[11px] font-extrabold flex items-center gap-1 transition-all ${
+                              isInvited
+                                ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/40 cursor-default'
+                                : (isOnline
+                                    ? 'bg-amber-500 hover:bg-amber-400 text-black shadow active:scale-95'
+                                    : 'bg-slate-800 text-slate-500 cursor-not-allowed')
+                            }`}
+                          >
+                            {isInvited ? (
+                              <>
+                                <Check className="w-3 h-3 text-emerald-400" />
+                                <span>Đã Mời</span>
+                              </>
+                            ) : (
+                              <>
+                                <Play className="w-3 h-3 fill-black" />
+                                <span>Mời Ngay ⚡</span>
+                              </>
+                            )}
+                          </button>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* CHECK (CHIẾU TƯỚNG) WARNING ALERT BANNER */}
+          {gameState?.inCheck && !gameState?.gameOver && (
+            <div className="w-[min(86vw,min(68vh,500px))] mb-2 p-2.5 rounded-2xl bg-gradient-to-r from-red-600 via-rose-600 to-red-600 border-2 border-red-300 text-white shadow-[0_0_25px_rgba(239,68,68,0.85)] flex items-center justify-center gap-2 animate-bounce-short z-20">
+              <span className="text-lg">⚠️</span>
+              <span className="text-xs sm:text-sm font-black uppercase tracking-wider">
+                {gameState.turn === myPlayerIndex
+                  ? 'BẠN ĐANG BỊ CHIẾU TƯỚNG! (CẦN GIẢI CHIẾU)'
+                  : (isSpectator
+                      ? `CHIẾU TƯỚNG! ${gameState.turn === 0 ? player0.displayName : player1.displayName} ĐANG BỊ CHIẾU!`
+                      : 'ĐANG CHIẾU TƯỚNG ĐỐI THỦ!')}
+              </span>
+              <span className="text-lg">⚡</span>
             </div>
           )}
 
@@ -688,7 +957,7 @@ export const GameBoardView = ({ matchConfig, user, onExitMatch, onUserUpdated })
                 gameState={gameState}
                 onMove={move => executeMove(move, gameState.turn)}
                 playerIndex={isSpectator ? 0 : myPlayerIndex}
-                isInteractive={!isSpectator && !gameState.gameOver && (mode === 'pass_play' || gameState.turn === myPlayerIndex)}
+                isInteractive={!isSpectator && !isWaitingForOpponent && !gameState.gameOver && (mode === 'pass_play' || gameState.turn === myPlayerIndex)}
               />
             )}
           </div>
@@ -700,18 +969,60 @@ export const GameBoardView = ({ matchConfig, user, onExitMatch, onUserUpdated })
                 <img
                   src={player0.avatar || 'https://api.dicebear.com/7.x/bottts/svg?seed=user'}
                   alt="avatar"
-                  className={`w-9 h-9 rounded-full border-2 ${gameState?.turn === 0 ? 'border-amber-400 ring-2 ring-amber-400/40' : 'border-slate-700'}`}
+                  className={`w-9 h-9 rounded-full border-2 transition-all ${
+                    isMySpeaking
+                      ? 'border-emerald-400 ring-4 ring-emerald-400/60 shadow-[0_0_15px_rgba(52,211,153,0.8)] scale-105'
+                      : (gameState?.turn === 0 ? 'border-amber-400 ring-2 ring-amber-400/40' : 'border-slate-700')
+                  }`}
                 />
-                {activeSpeakers.has('me') && (
-                  <span className="absolute -bottom-1 -right-1 w-3.5 h-3.5 rounded-full bg-emerald-500 ring-2 ring-black" />
+                {isMySpeaking && (
+                  <span className="absolute -bottom-1 -right-1 w-3.5 h-3.5 rounded-full bg-emerald-500 ring-2 ring-black animate-ping" />
                 )}
               </div>
               <div>
-                <div className="flex items-center gap-1.5">
+                <div className="flex items-center gap-1.5 flex-wrap">
                   <span className="text-xs font-bold text-white">{player0.displayName}</span>
                   <span className="text-[10px] font-bold px-1.5 py-0.2 rounded bg-amber-500/20 text-amber-300 border border-amber-500/30">
                     {getSideName(gameId, 0)}
                   </span>
+                  {/* My Voice Status Indicator */}
+                  {isMyVoiceConnected ? (
+                    <span className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[10px] font-bold border transition-all ${
+                      isMySpeaking
+                        ? 'bg-emerald-500/20 text-emerald-300 border-emerald-400 shadow-[0_0_10px_rgba(52,211,153,0.6)] animate-pulse'
+                        : (isMyMuted
+                            ? 'bg-red-500/10 text-red-400 border-red-500/30'
+                            : 'bg-emerald-500/10 text-emerald-400 border-emerald-500/30')
+                    }`}>
+                      {isMySpeaking ? (
+                        <>
+                          <span className="flex items-end gap-0.5 h-2.5 px-0.5">
+                            <span className="w-0.5 h-1.5 bg-emerald-400 animate-bounce" style={{ animationDelay: '0ms' }} />
+                            <span className="w-0.5 h-2.5 bg-emerald-400 animate-bounce" style={{ animationDelay: '150ms' }} />
+                            <span className="w-0.5 h-1.5 bg-emerald-400 animate-bounce" style={{ animationDelay: '300ms' }} />
+                          </span>
+                          <span>Bạn đang nói...</span>
+                        </>
+                      ) : isMyMuted ? (
+                        <>
+                          <MicOff className="w-2.5 h-2.5 text-red-400" />
+                          <span>Đang tắt mic</span>
+                        </>
+                      ) : (
+                        <>
+                          <Mic className="w-2.5 h-2.5 text-emerald-400" />
+                          <span>Đang bật mic</span>
+                        </>
+                      )}
+                    </span>
+                  ) : (
+                    <button
+                      onClick={handleToggleVoice}
+                      className="text-[10px] text-amber-400 hover:text-amber-300 font-bold underline flex items-center gap-0.5"
+                    >
+                      <Mic className="w-2.5 h-2.5" /> Bật Voice
+                    </button>
+                  )}
                 </div>
                 <div className="text-[10px] text-slate-400">
                   Rating: {player0.rating || 1500}
@@ -721,7 +1032,7 @@ export const GameBoardView = ({ matchConfig, user, onExitMatch, onUserUpdated })
 
             {/* User Clock */}
             <div className={`px-3 py-1 rounded-lg font-mono font-bold text-sm ${gameState?.turn === 0 ? 'bg-amber-500 text-black animate-pulse-fast' : 'bg-slate-900 text-slate-300'}`}>
-              {formatTime(clocks[0])}
+              {formatTime(clocks[0] ?? clocks['0'])}
             </div>
           </div>
         </div>

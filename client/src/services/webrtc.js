@@ -220,8 +220,8 @@ export class VoiceChatManager {
     });
 
     // Peer speaking / muted state update
-    s.on('voice:user_state', ({ peerId, muted, speaking }) => {
-      const u = this.roster.find(r => r.peerId === peerId);
+    s.on('voice:user_state', ({ peerId, userId, muted, speaking }) => {
+      const u = this.roster.find(r => r.peerId === peerId || (userId && (r.userId === userId || r.id === userId)));
       if (u) {
         if (muted !== undefined) u.muted = muted;
         if (speaking !== undefined) {
@@ -229,9 +229,9 @@ export class VoiceChatManager {
           if (speaking) this.activeSpeakers.add(peerId);
           else this.activeSpeakers.delete(peerId);
         }
-        if (this.onSpeakersChanged) this.onSpeakersChanged(speaking, peerId);
-        if (this.onRosterChanged) this.onRosterChanged([...this.roster]);
       }
+      if (this.onSpeakersChanged) this.onSpeakersChanged(speaking, peerId);
+      if (this.onRosterChanged) this.onRosterChanged([...this.roster]);
     });
 
     // Peer disconnected from voice

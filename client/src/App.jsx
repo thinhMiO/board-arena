@@ -26,6 +26,7 @@ export function App() {
   const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
   const [isProfileModalOpen, setIsProfileModalOpen] = useState(false);
   const [matchConfig, setMatchConfig] = useState(null);
+  const [incomingInvite, setIncomingInvite] = useState(null);
   const [guideGameId, setGuideGameId] = useState(null);
   const [isSoundOn, setIsSoundOn] = useState(true);
   const [categoryFilter, setCategoryFilter] = useState('all');
@@ -106,9 +107,20 @@ export function App() {
       setPublicRooms(prev => [newRoom, ...prev.filter(r => r.code !== newRoom.code)]);
     });
 
+    s.on('lobby:room_removed', removedCode => {
+      setPublicRooms(prev => prev.filter(r => r.code !== removedCode));
+    });
+
+    s.on('friend:game_invite', invite => {
+      sound.playVictory();
+      setIncomingInvite(invite);
+    });
+
     return () => {
       s.off('matchmaking:matched');
       s.off('lobby:room_created');
+      s.off('lobby:room_removed');
+      s.off('friend:game_invite');
     };
   }, [selectedGame]);
 
@@ -141,6 +153,14 @@ export function App() {
         user
       }, res => {
         if (res.success) {
+          if (config.inviteUserId) {
+            socketService.emit('friend:invite', {
+              toUserId: config.inviteUserId,
+              roomCode: res.room.code,
+              gameId: config.gameId,
+              gameName: GameRegistry.get(config.gameId)?.nameVi || 'Bàn Cờ'
+            });
+          }
           setMatchConfig({
             gameId: config.gameId,
             mode: 'online',
@@ -235,7 +255,8 @@ export function App() {
       gameId: gameObj.id,
       roomName: `Phòng mời ${friend.displayName}`,
       isPrivate: false,
-      timeControl: '10+0'
+      timeControl: '10+0',
+      inviteUserId: friend.id
     });
   };
 
@@ -279,6 +300,7 @@ export function App() {
       <main className="flex-1 pb-12">
         {currentTab === 'game' && matchConfig ? (
           <GameBoardView
+            key={`${matchConfig.mode}_${matchConfig.roomCode || matchConfig.gameId}_${matchConfig.room?.createdAt || ''}`}
             matchConfig={matchConfig}
             user={user}
             onExitMatch={() => { setCurrentTab('lobby'); setMatchConfig(null); }}
@@ -580,6 +602,55 @@ export function App() {
         isOpen={!!guideGameId}
         onClose={() => setGuideGameId(null)}
       />
+
+      {/* Real-time Game Invitation Banner */}
+      {incomingInvite && (
+        <div className="fixed top-5 right-5 z-50 max-w-sm w-full p-4 rounded-2xl glass-panel border-2 border-amber-400 bg-slate-900/95 shadow-2xl animate-fade-in">
+          <div className="flex items-start gap-3">
+            <img
+              src={incomingInvite.fromUser?.avatar || 'https://api.dicebear.com/7.x/bottts/svg?seed=friend'}
+              alt="avatar"
+              className="w-12 h-12 rounded-full border-2 border-amber-400 shrink-0"
+            />
+            <div className="flex-1 min-w-0">
+              <h4 className="font-extrabold text-sm text-white flex items-center gap-1.5">
+                <span className="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-ping shrink-0" />
+                <span>Lời Mời Thi Đấu!</span>
+              </h4>
+              <p className="text-xs text-slate-300 mt-1">
+                <strong className="text-amber-300">{incomingInvite.fromUser?.displayName || 'Bạn bè'}</strong> mời bạn chơi môn <strong className="text-amber-300">{incomingInvite.gameName}</strong>
+              </p>
+              <div className="text-[10px] text-slate-400 font-mono mt-0.5">
+                Mã phòng: <strong className="text-amber-400">{incomingInvite.roomCode}</strong>
+              </div>
+
+              <div className="flex gap-2 mt-3">
+                <button
+                  onClick={() => {
+                    const invite = incomingInvite;
+                    setIncomingInvite(null);
+                    handleStartMatch({
+                      mode: 'join_room',
+                      roomCode: invite.roomCode,
+                      gameId: invite.gameId
+                    });
+                  }}
+                  className="flex-1 py-1.5 px-3 rounded-xl bg-gradient-to-r from-emerald-500 to-green-500 hover:from-emerald-400 hover:to-green-400 text-black font-extrabold text-xs shadow flex items-center justify-center gap-1 transition-all"
+                >
+                  <Play className="w-3.5 h-3.5 fill-black" />
+                  <span>Vào Bàn Ngay</span>
+                </button>
+                <button
+                  onClick={() => setIncomingInvite(null)}
+                  className="py-1.5 px-3 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold text-xs border border-slate-700 transition-all"
+                >
+                  Từ Chối
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

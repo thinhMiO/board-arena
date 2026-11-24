@@ -90,6 +90,7 @@ export const XiangqiBoard = ({ gameState, onMove, gameEngine, isInteractive = tr
                 const targetMove = candidateMoves.find(m => m.to.r === r && m.to.c === c);
                 const isCapture = targetMove && piece !== null;
                 const isQuietMove = targetMove && !isCapture;
+                const isGeneralInCheck = gameState.inCheck && piece && piece.type === 'K' && piece.color === gameState.turn;
 
                 return (
                   <div
@@ -106,6 +107,11 @@ export const XiangqiBoard = ({ gameState, onMove, gameEngine, isInteractive = tr
                     {/* Palace Diagonals */}
                     {((r === 0 && c === 3) || (r === 7 && c === 3)) && (
                       <div className="absolute w-[200%] h-[200%] border-t border-r border-[#9e6b38]/40 pointer-events-none rotate-45 transform origin-top-left" />
+                    )}
+
+                    {/* General Check Flash Ring */}
+                    {isGeneralInCheck && (
+                      <div className="absolute w-9 h-9 sm:w-12 sm:h-12 rounded-full border-2 border-red-500 bg-red-600/40 z-10 animate-ping pointer-events-none" />
                     )}
 
                     {/* Selection Indicator */}
@@ -132,6 +138,10 @@ export const XiangqiBoard = ({ gameState, onMove, gameEngine, isInteractive = tr
                     {piece && (
                       <div
                         className={`relative z-20 w-7 h-7 xs:w-8 xs:h-8 sm:w-10 sm:h-10 rounded-full flex items-center justify-center font-bold text-base sm:text-xl shadow-md border-2 transform group-hover:scale-110 transition-transform ${
+                          isGeneralInCheck
+                            ? 'ring-4 ring-red-600 shadow-[0_0_20px_rgba(239,68,68,0.95)] animate-pulse scale-105 !border-red-500'
+                            : ''
+                        } ${
                           piece.color === 0
                             ? 'bg-[#fff5ea] text-red-600 border-red-700 shadow-red-950/40'
                             : 'bg-[#29231f] text-amber-100 border-[#69584d] shadow-black/60'

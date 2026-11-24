@@ -85,6 +85,7 @@ export const ChessBoard = ({ gameState, onMove, playerIndex, gameEngine, isInter
               const targetMove = candidateMoves.find(m => m.to.r === r && m.to.c === c);
               const isCapture = targetMove && (piece !== null || targetMove.isEnPassant);
               const isQuietMove = targetMove && !isCapture;
+              const isKingInCheck = gameState.inCheck && piece && piece.type === 'K' && piece.color === gameState.turn;
 
               return (
                 <div
@@ -92,9 +93,11 @@ export const ChessBoard = ({ gameState, onMove, playerIndex, gameEngine, isInter
                   onClick={() => handleSquareClick(r, c)}
                   style={{ width: '100%', height: '100%' }}
                   className={`relative flex items-center justify-center cursor-pointer transition-all duration-100 ${
-                    isDark ? 'bg-[#769656]' : 'bg-[#eeeed2]'
+                    isKingInCheck
+                      ? '!bg-red-600/90 ring-4 ring-red-500 shadow-[0_0_20px_rgba(239,68,68,0.9)] animate-pulse z-10'
+                      : (isDark ? 'bg-[#769656]' : 'bg-[#eeeed2]')
                   } ${sel ? '!bg-[#f7c04a] ring-4 ring-amber-400 z-10' : ''} ${
-                    isLastMove && !sel ? 'after:absolute after:inset-0 after:bg-[#f5e15c]/50' : ''
+                    isLastMove && !sel && !isKingInCheck ? 'after:absolute after:inset-0 after:bg-[#f5e15c]/50' : ''
                   }`}
                 >
                   {/* File & Rank Coordinate Labels */}

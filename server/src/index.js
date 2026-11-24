@@ -208,10 +208,10 @@ app.get('/api/matches/:matchId', (req, res) => {
   res.json(match);
 });
 
-// Rooms list
+// Rooms list (exclude ended rooms and empty rooms)
 app.get('/api/rooms', (req, res) => {
   const publicRooms = Array.from(roomManager.rooms.values())
-    .filter(r => !r.isPrivate)
+    .filter(r => !r.isPrivate && (r.isDemo || (r.status !== 'ended' && r.players.length > 0)))
     .map(r => roomManager.sanitizeRoom(r));
   res.json(publicRooms);
 });
@@ -253,12 +253,20 @@ app.get('*', (req, res) => {
 
 // ==================== REALTIME SOCKET.IO ====================
 
+// Track online users: userId -> Set of socketId
+const userSockets = new Map();
+
 io.on('connection', socket => {
   let currentUser = null;
   let currentRoomCode = null;
 
   socket.on('auth:init', user => {
     currentUser = user;
+    if (user && user.id) {
+      if (!userSockets.has(user.id)) userSockets.set(user.id, new Set());
+      userSockets.get(user.id).add(socket.id);
+      io.emit('users:online_status', { userId: user.id, isOnline: true });
+    }
     socket.emit('auth:ready', { status: 'connected', user });
   });
 
@@ -406,14 +414,55 @@ io.on('connection', socket => {
       if (speaking !== undefined) v.speaking = speaking;
       io.to(`voice_${roomCode}`).emit('voice:user_state', {
         peerId: socket.id,
+        userId: v.userId,
         muted: v.muted,
         speaking: v.speaking
       });
     }
   });
 
+  // Check online status of friend IDs
+  socket.on('friends:check_online', ({ friendIds }, callback) => {
+    const onlineMap = {};
+    if (Array.isArray(friendIds)) {
+      friendIds.forEach(id => {
+        onlineMap[id] = userSockets.has(id) && userSockets.get(id).size > 0;
+      });
+    }
+    if (typeof callback === 'function') callback(onlineMap);
+  });
+
+  // Send game invite to online friend
+  socket.on('friend:invite', ({ toUserId, roomCode, gameId, gameName }, callback) => {
+    if (!toUserId || !userSockets.has(toUserId) || userSockets.get(toUserId).size === 0) {
+      if (typeof callback === 'function') callback({ success: false, error: 'Bạn bè hiện không online.' });
+      return;
+    }
+
+    const sockets = userSockets.get(toUserId);
+    sockets.forEach(targetSocketId => {
+      io.to(targetSocketId).emit('friend:game_invite', {
+        fromUser: currentUser,
+        roomCode,
+        gameId,
+        gameName: gameName || 'Bàn Cờ',
+        timestamp: Date.now()
+      });
+    });
+
+    if (typeof callback === 'function') callback({ success: true, message: 'Đã gửi lời mời!' });
+  });
+
   // Disconnect cleanup
   socket.on('disconnect', () => {
+    if (currentUser?.id && userSockets.has(currentUser.id)) {
+      const set = userSockets.get(currentUser.id);
+      set.delete(socket.id);
+      if (set.size === 0) {
+        userSockets.delete(currentUser.id);
+        io.emit('users:online_status', { userId: currentUser.id, isOnline: false });
+      }
+    }
     matchmaking.dequeue(socket.id);
     if (currentRoomCode) {
       roomManager.leaveRoom(currentRoomCode, currentUser?.id);

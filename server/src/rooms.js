@@ -103,6 +103,7 @@ export class RoomManager {
     else if (timerPreset === 'unlimited') { initialSecs = 86400; incSecs = 0; }
 
     const timer = TimerManager.createInitialClocks(initialSecs, incSecs, game.maxPlayers || 2);
+    timer.clocks = timer.times;
     const initialGameState = game.init(options);
 
     const room = {
@@ -249,25 +250,24 @@ export class RoomManager {
         );
 
         this.endGame(roomCode, winnerIndex, `${playerName} đã rời khỏi bàn đấu (Xử thua).`);
+        // Remove leaver from room.players now that match has ended
+        room.players.splice(playerIndex, 1);
+        this.io.to(roomCode).emit('room:updated', this.sanitizeRoom(room));
       } else if (room.status === 'waiting') {
         // Room was waiting for players
         room.players.splice(playerIndex, 1);
         this.broadcastSystemMessage(roomCode, `👋 ${playerName} đã rời phòng chờ.`);
-        if (room.players.length === 0 && room.spectators.length === 0 && !room.isDemo) {
-          this.rooms.delete(roomCode);
-          this.io.emit('lobby:room_removed', roomCode);
-        } else {
-          this.io.to(roomCode).emit('room:updated', this.sanitizeRoom(room));
-        }
+        this.io.to(roomCode).emit('room:updated', this.sanitizeRoom(room));
       } else if (room.status === 'ended') {
         // Player leaves after match ended
         room.players.splice(playerIndex, 1);
-        if (room.players.length === 0 && room.spectators.length === 0 && !room.isDemo) {
-          this.rooms.delete(roomCode);
-          this.io.emit('lobby:room_removed', roomCode);
-        } else {
-          this.io.to(roomCode).emit('room:updated', this.sanitizeRoom(room));
-        }
+        this.io.to(roomCode).emit('room:updated', this.sanitizeRoom(room));
+      }
+
+      // Check if room is empty (both players left) -> Delete room immediately
+      if (room.players.length === 0 && room.spectators.length === 0 && !room.isDemo) {
+        this.rooms.delete(roomCode);
+        this.io.emit('lobby:room_removed', roomCode);
       }
     }
   }
@@ -330,6 +330,21 @@ export class RoomManager {
     }, 3200);
   }
 
+  getTimerSnapshot(timer) {
+    if (!timer) return null;
+    const now = Date.now();
+    const elapsed = timer.running ? Math.floor((now - timer.lastTick) / 1000) : 0;
+    const currentTimes = { ...timer.times };
+    if (timer.running && currentTimes[timer.activePlayer] !== undefined) {
+      currentTimes[timer.activePlayer] = Math.max(0, currentTimes[timer.activePlayer] - elapsed);
+    }
+    return {
+      ...timer,
+      times: currentTimes,
+      clocks: currentTimes
+    };
+  }
+
   startGame(roomCode) {
     const room = this.rooms.get(roomCode);
     if (!room || room.status === 'playing') return;
@@ -338,12 +353,13 @@ export class RoomManager {
     room.status = 'playing';
     room.timer.running = true;
     room.timer.lastTick = Date.now();
+    room.timer.clocks = room.timer.times;
     room.gameState = game.init({});
 
     this.broadcastSystemMessage(roomCode, '⚔️ Trận đấu chính thức bắt đầu!');
     this.io.to(roomCode).emit('game:started', {
       gameState: room.gameState,
-      timer: room.timer,
+      timer: this.getTimerSnapshot(room.timer),
       status: room.status
     });
   }
@@ -377,6 +393,7 @@ export class RoomManager {
     // Switch clock turn
     const nextPlayerIndex = room.gameState.turn;
     TimerManager.switchTurn(room.timer, nextPlayerIndex);
+    room.timer.clocks = room.timer.times;
 
     // Check game over
     if (moveResult.result && moveResult.result.over) {
@@ -387,7 +404,7 @@ export class RoomManager {
         notation,
         playerIndex,
         gameState: room.gameState,
-        timer: room.timer
+        timer: this.getTimerSnapshot(room.timer)
       });
     }
 
@@ -495,14 +512,19 @@ export class RoomManager {
   }
 
   startGlobalTimerLoop() {
+    let tickCount = 0;
     setInterval(() => {
+      tickCount++;
       this.rooms.forEach((room, roomCode) => {
-        if (room.status === 'playing' && room.timer.running) {
+        if (room.status === 'playing' && room.timer && room.timer.running) {
           const timeout = TimerManager.checkTimeout(room.timer);
           if (timeout) {
             const timedOutPlayer = room.players[timeout.timedOutPlayer];
             const reason = `${timedOutPlayer ? timedOutPlayer.displayName : 'Người chơi'} đã hết thời gian thi đấu!`;
             this.endGame(roomCode, timeout.winner, reason);
+          } else if (tickCount % 2 === 0) {
+            // Periodic timer sync every 2 seconds to keep clocks in sync
+            this.io.to(roomCode).emit('timer:sync', this.getTimerSnapshot(room.timer));
           }
         }
       });
