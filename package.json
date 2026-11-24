@@ -1,0 +1,37 @@
+{
+  "name": "board-arena",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "BOARD ARENA - Nền tảng chơi cờ trực tuyến đa trò chơi",
+  "private": true,
+  "workspaces": [
+    "server",
+    "client"
+  ],
+  "scripts": {
+    "build": "npm run build --prefix client",
+    "start": "node server/src/index.js",
+    "dev:server": "npm run dev --prefix server",
+    "dev:client": "npm run dev --prefix client",
+    "dev": "node scripts/dev.js",
+    "install:all": "npm install"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "keywords": [
+    "board-games",
+    "chess",
+    "xiangqi",
+    "go",
+    "gomoku",
+    "checkers",
+    "reversi",
+    "connect-four",
+    "shogi",
+    "webrtc",
+    "socketio"
+  ],
+  "author": "Board Arena Team",
+  "license": "MIT"
+}
