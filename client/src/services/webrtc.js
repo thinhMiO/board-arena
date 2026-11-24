@@ -1,6 +1,11 @@
 /**
  * WebRTC Voice Chat Manager
- * Handles peer connections, microphone streaming, audio analysis for speaking indicators, and STUN servers.
+ * Production-ready WebRTC implementation with:
+ * - Multi-STUN & OpenRelay TURN servers for NAT & 4G/cellular traversal
+ * - Candidate queuing to prevent "Remote description is null" race conditions
+ * - Explicit Offer/Answer exchange
+ * - Mobile Autoplay policy unlock (iOS Safari & Android Chrome)
+ * - Real-time microphone audio visualizer
  */
 export class VoiceChatManager {
   constructor(socketService, roomCode, user) {
@@ -11,26 +16,48 @@ export class VoiceChatManager {
     this.localStream = null;
     this.peers = new Map(); // peerId -> RTCPeerConnection
     this.audioElements = new Map(); // peerId -> HTMLAudioElement
+    this.pendingCandidates = new Map(); // peerId -> RTCIceCandidateInit[]
 
     this.isMuted = false;
     this.isDeafened = false;
     this.isSpeaking = false;
-    this.activeSpeakers = new Set(); // set of peerIds currently speaking
+    this.activeSpeakers = new Set();
 
     this.analyser = null;
+    this.audioCtx = null;
     this.animFrameId = null;
 
+    // Production STUN & Free Public TURN Servers for global NAT traversal
     this.rtcConfig = {
       iceServers: [
         { urls: 'stun:stun.l.google.com:19302' },
         { urls: 'stun:stun1.l.google.com:19302' },
-        { urls: 'stun:stun2.l.google.com:19302' }
-      ]
+        { urls: 'stun:stun2.l.google.com:19302' },
+        { urls: 'stun:stun3.l.google.com:19302' },
+        { urls: 'stun:stun.cloudflare.com:3478' },
+        { urls: 'stun:openrelay.metered.ca:80' },
+        {
+          urls: 'turn:openrelay.metered.ca:80',
+          username: 'openrelayproject',
+          credential: 'openrelayproject'
+        },
+        {
+          urls: 'turn:openrelay.metered.ca:443',
+          username: 'openrelayproject',
+          credential: 'openrelayproject'
+        },
+        {
+          urls: 'turn:openrelay.metered.ca:443?transport=tcp',
+          username: 'openrelayproject',
+          credential: 'openrelayproject'
+        }
+      ],
+      iceCandidatePoolSize: 10
     };
 
     this.onSpeakersChanged = null;
     this.onRosterChanged = null;
-    this.roster = []; // list of voice users in room
+    this.roster = [];
   }
 
   async init() {
@@ -57,16 +84,27 @@ export class VoiceChatManager {
       return { success: true };
     } catch (err) {
       console.warn('[WebRTC Voice] Microphone access denied or unavailable:', err.message);
-      return { success: false, error: 'Không thể truy cập microphone. Vui lòng cấp quyền trong trình duyệt.' };
+      return { success: false, error: 'Không thể truy cập microphone. Vui lòng cấp quyền Microphone trong trình duyệt.' };
     }
   }
 
   _setupAudioAnalyser(stream) {
     try {
       const AudioCtx = window.AudioContext || window.webkitAudioContext;
-      const audioCtx = new AudioCtx();
-      const source = audioCtx.createMediaStreamSource(stream);
-      this.analyser = audioCtx.createAnalyser();
+      if (!AudioCtx) return;
+      this.audioCtx = new AudioCtx();
+      if (this.audioCtx.state === 'suspended') {
+        const resumeCtx = () => {
+          this.audioCtx?.resume();
+          document.removeEventListener('click', resumeCtx);
+          document.removeEventListener('touchstart', resumeCtx);
+        };
+        document.addEventListener('click', resumeCtx, { once: true });
+        document.addEventListener('touchstart', resumeCtx, { once: true });
+      }
+
+      const source = this.audioCtx.createMediaStreamSource(stream);
+      this.analyser = this.audioCtx.createAnalyser();
       this.analyser.fftSize = 256;
       source.connect(this.analyser);
 
@@ -81,7 +119,7 @@ export class VoiceChatManager {
           sum += dataArray[i];
         }
         const avg = sum / bufferLength;
-        const nowSpeaking = avg > 25 && !this.isMuted;
+        const nowSpeaking = avg > 14 && !this.isMuted;
 
         if (nowSpeaking !== this.isSpeaking) {
           this.isSpeaking = nowSpeaking;
@@ -99,71 +137,95 @@ export class VoiceChatManager {
 
       checkVolume();
     } catch (e) {
-      console.warn('AudioAnalyser setup skipped', e);
+      console.warn('[WebRTC Voice] AudioAnalyser setup skipped', e);
     }
   }
 
   _setupSocketListeners() {
     const s = this.socketService.getSocket();
 
-    // Roster of current voice users
-    s.on('voice:roster', peers => {
+    // Roster of current voice users (received by newcomer)
+    s.on('voice:roster', async peers => {
       this.roster = peers;
       if (this.onRosterChanged) this.onRosterChanged(this.roster);
-      // Initiate WebRTC offers to all existing peers
-      peers.forEach(p => {
+
+      // Newcomer initiates WebRTC offers to all existing peers in the room
+      for (const p of peers) {
         if (p.peerId !== s.id) {
-          this._createPeerConnection(p.peerId, true);
+          await this._initiateCall(p.peerId);
         }
-      });
+      }
     });
 
-    // New peer joined
+    // New peer joined the room
     s.on('voice:peer_joined', ({ peerId, user }) => {
-      this.roster.push({ peerId, ...user, muted: false, speaking: false });
-      if (this.onRosterChanged) this.onRosterChanged(this.roster);
-      // Wait for incoming offer or initiate
+      const existing = this.roster.find(r => r.peerId === peerId);
+      if (!existing) {
+        this.roster.push({ peerId, ...user, muted: false, speaking: false });
+      }
+      if (this.onRosterChanged) this.onRosterChanged([...this.roster]);
     });
 
-    // Incoming offer
+    // Incoming WebRTC offer
     s.on('voice:offer', async ({ fromPeerId, offer }) => {
-      const pc = this._createPeerConnection(fromPeerId, false);
-      await pc.setRemoteDescription(new RTCSessionDescription(offer));
-      const answer = await pc.createAnswer();
-      await pc.setLocalDescription(answer);
-      this.socketService.emit('voice:answer', {
-        toPeerId: fromPeerId,
-        answer
-      });
+      try {
+        const pc = this._getOrCreatePeerConnection(fromPeerId);
+        await pc.setRemoteDescription(new RTCSessionDescription(offer));
+
+        // Flush any candidates that arrived before the remote description
+        await this._flushPendingCandidates(fromPeerId, pc);
+
+        const answer = await pc.createAnswer();
+        await pc.setLocalDescription(answer);
+
+        this.socketService.emit('voice:answer', {
+          toPeerId: fromPeerId,
+          answer
+        });
+      } catch (err) {
+        console.error('[WebRTC Voice] Error handling incoming offer:', err);
+      }
     });
 
-    // Incoming answer
+    // Incoming WebRTC answer
     s.on('voice:answer', async ({ fromPeerId, answer }) => {
-      const pc = this.peers.get(fromPeerId);
-      if (pc) {
-        await pc.setRemoteDescription(new RTCSessionDescription(answer));
+      try {
+        const pc = this.peers.get(fromPeerId);
+        if (pc) {
+          await pc.setRemoteDescription(new RTCSessionDescription(answer));
+          await this._flushPendingCandidates(fromPeerId, pc);
+        }
+      } catch (err) {
+        console.error('[WebRTC Voice] Error handling answer:', err);
       }
     });
 
     // Incoming ICE candidate
     s.on('voice:ice-candidate', async ({ fromPeerId, candidate }) => {
+      if (!candidate) return;
       const pc = this.peers.get(fromPeerId);
-      if (pc && candidate) {
+      if (pc && pc.remoteDescription && pc.remoteDescription.type) {
         try {
           await pc.addIceCandidate(new RTCIceCandidate(candidate));
         } catch (e) {
-          console.error('Error adding ICE candidate', e);
+          console.warn('[WebRTC Voice] Failed to add ICE candidate immediately:', e);
         }
+      } else {
+        // Queue candidate until remote description is set
+        if (!this.pendingCandidates.has(fromPeerId)) {
+          this.pendingCandidates.set(fromPeerId, []);
+        }
+        this.pendingCandidates.get(fromPeerId).push(candidate);
       }
     });
 
-    // Peer state update (muted, speaking)
+    // Peer speaking / muted state update
     s.on('voice:user_state', ({ peerId, muted, speaking }) => {
-      const user = this.roster.find(r => r.peerId === peerId);
-      if (user) {
-        if (muted !== undefined) user.muted = muted;
+      const u = this.roster.find(r => r.peerId === peerId);
+      if (u) {
+        if (muted !== undefined) u.muted = muted;
         if (speaking !== undefined) {
-          user.speaking = speaking;
+          u.speaking = speaking;
           if (speaking) this.activeSpeakers.add(peerId);
           else this.activeSpeakers.delete(peerId);
         }
@@ -172,28 +234,50 @@ export class VoiceChatManager {
       }
     });
 
-    // Peer left
+    // Peer disconnected from voice
     s.on('voice:peer_left', ({ peerId }) => {
       this._removePeer(peerId);
       this.roster = this.roster.filter(r => r.peerId !== peerId);
-      if (this.onRosterChanged) this.onRosterChanged(this.roster);
+      this.activeSpeakers.delete(peerId);
+      if (this.onSpeakersChanged) this.onSpeakersChanged(false, peerId);
+      if (this.onRosterChanged) this.onRosterChanged([...this.roster]);
     });
   }
 
-  _createPeerConnection(peerId, isInitiator) {
-    if (this.peers.has(peerId)) return this.peers.get(peerId);
+  async _initiateCall(peerId) {
+    try {
+      const pc = this._getOrCreatePeerConnection(peerId);
+      const offer = await pc.createOffer({
+        offerToReceiveAudio: true,
+        offerToReceiveVideo: false
+      });
+      await pc.setLocalDescription(offer);
+
+      this.socketService.emit('voice:offer', {
+        toPeerId: peerId,
+        offer
+      });
+    } catch (err) {
+      console.error('[WebRTC Voice] Error creating offer:', err);
+    }
+  }
+
+  _getOrCreatePeerConnection(peerId) {
+    if (this.peers.has(peerId)) {
+      return this.peers.get(peerId);
+    }
 
     const pc = new RTCPeerConnection(this.rtcConfig);
     this.peers.set(peerId, pc);
 
-    // Add local mic audio tracks
+    // Add local mic tracks
     if (this.localStream) {
       this.localStream.getTracks().forEach(track => {
         pc.addTrack(track, this.localStream);
       });
     }
 
-    // ICE candidate generation
+    // ICE Candidate generation
     pc.onicecandidate = event => {
       if (event.candidate) {
         this.socketService.emit('voice:ice-candidate', {
@@ -207,31 +291,48 @@ export class VoiceChatManager {
     pc.ontrack = event => {
       let audio = this.audioElements.get(peerId);
       if (!audio) {
-        audio = new Audio();
+        audio = document.createElement('audio');
         audio.autoplay = true;
+        audio.playsInline = true;
+        audio.setAttribute('playsinline', 'true');
+        audio.style.display = 'none';
+        document.body.appendChild(audio);
         this.audioElements.set(peerId, audio);
       }
+
       audio.srcObject = event.streams[0];
       audio.muted = this.isDeafened;
+
+      // Handle mobile autoplay restrictions
+      audio.play().catch(e => {
+        console.warn('[WebRTC Voice] Audio playback blocked by browser, unlocking on user tap:', e);
+        const unlock = () => {
+          audio.play();
+          document.removeEventListener('click', unlock);
+          document.removeEventListener('touchstart', unlock);
+        };
+        document.addEventListener('click', unlock, { once: true });
+        document.addEventListener('touchstart', unlock, { once: true });
+      });
     };
 
-    // If initiator, create offer
-    if (isInitiator) {
-      pc.onnegotiationneeded = async () => {
-        try {
-          const offer = await pc.createOffer();
-          await pc.setLocalDescription(offer);
-          this.socketService.emit('voice:offer', {
-            toPeerId: peerId,
-            offer
-          });
-        } catch (e) {
-          console.error('Error creating offer', e);
-        }
-      };
-    }
+    pc.onconnectionstatechange = () => {
+      console.log(`[WebRTC Voice] Peer ${peerId} connection state:`, pc.connectionState);
+    };
 
     return pc;
+  }
+
+  async _flushPendingCandidates(peerId, pc) {
+    const queue = this.pendingCandidates.get(peerId) || [];
+    for (const cand of queue) {
+      try {
+        await pc.addIceCandidate(new RTCIceCandidate(cand));
+      } catch (err) {
+        console.warn('[WebRTC Voice] Error adding queued ICE candidate:', err);
+      }
+    }
+    this.pendingCandidates.delete(peerId);
   }
 
   _removePeer(peerId) {
@@ -240,10 +341,15 @@ export class VoiceChatManager {
       pc.close();
       this.peers.delete(peerId);
     }
+    this.pendingCandidates.delete(peerId);
+
     const audio = this.audioElements.get(peerId);
     if (audio) {
       audio.pause();
       audio.srcObject = null;
+      if (audio.parentNode) {
+        audio.parentNode.removeChild(audio);
+      }
       this.audioElements.delete(peerId);
     }
   }
@@ -273,12 +379,23 @@ export class VoiceChatManager {
 
   destroy() {
     if (this.animFrameId) cancelAnimationFrame(this.animFrameId);
+    if (this.audioCtx) {
+      try { this.audioCtx.close(); } catch {}
+    }
     if (this.localStream) {
       this.localStream.getTracks().forEach(t => t.stop());
     }
     this.peers.forEach(pc => pc.close());
     this.peers.clear();
-    this.audioElements.forEach(a => { a.pause(); a.srcObject = null; });
+    this.pendingCandidates.clear();
+
+    this.audioElements.forEach(audio => {
+      audio.pause();
+      audio.srcObject = null;
+      if (audio.parentNode) {
+        audio.parentNode.removeChild(audio);
+      }
+    });
     this.audioElements.clear();
   }
 }
