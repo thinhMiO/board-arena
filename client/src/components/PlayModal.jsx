@@ -9,6 +9,7 @@ export const PlayModal = ({ game, isOpen, onClose, onStartMatch, defaultTab = 'a
   const [aiDifficulty, setAiDifficulty] = useState('medium');
   const [timeControl, setTimeControl] = useState('10+0');
   const [roomName, setRoomName] = useState('');
+  const [usePassword, setUsePassword] = useState(false);
   const [roomPassword, setRoomPassword] = useState('');
   const [isPrivate, setIsPrivate] = useState(false);
   const [joinRoomCode, setJoinRoomCode] = useState('');
@@ -17,6 +18,8 @@ export const PlayModal = ({ game, isOpen, onClose, onStartMatch, defaultTab = 'a
   useEffect(() => {
     if (isOpen) {
       setActiveTab(defaultTab);
+      setUsePassword(false);
+      setRoomPassword('');
     }
   }, [isOpen, defaultTab]);
 
@@ -40,12 +43,13 @@ export const PlayModal = ({ game, isOpen, onClose, onStartMatch, defaultTab = 'a
   };
 
   const handleCreateRoom = () => {
+    const finalPassword = usePassword && roomPassword.trim() ? roomPassword.trim() : null;
     onStartMatch({
       mode: 'create_room',
       gameId: game.id,
-      roomName: roomName || `Phòng ${game.nameVi}`,
-      password: roomPassword || null,
-      isPrivate,
+      roomName: roomName || `Bàn ${game.nameVi}`,
+      password: finalPassword,
+      isPrivate: !!finalPassword,
       timeControl
     });
     onClose();
@@ -289,18 +293,40 @@ export const PlayModal = ({ game, isOpen, onClose, onStartMatch, defaultTab = 'a
                 className="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-sm text-slate-100 focus:outline-none focus:border-amber-500"
               />
             </div>
-            <div>
-              <label className="text-xs font-bold text-slate-300 block mb-1">
-                Mật Khẩu Phòng (Tùy chọn)
+            <div className="pt-1">
+              <label className="flex items-center gap-2 cursor-pointer select-none text-xs text-slate-300">
+                <input
+                  type="checkbox"
+                  checked={usePassword}
+                  onChange={e => setUsePassword(e.target.checked)}
+                  className="rounded border-slate-700 bg-slate-950 text-amber-500 focus:ring-0 w-4 h-4 cursor-pointer"
+                />
+                <span className="font-bold flex items-center gap-1.5">
+                  <Lock className="w-3.5 h-3.5 text-amber-400" /> Đặt mật khẩu bảo vệ phòng
+                </span>
               </label>
-              <input
-                type="password"
-                placeholder="Để trống nếu muốn phòng công khai"
-                value={roomPassword}
-                onChange={e => setRoomPassword(e.target.value)}
-                className="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-sm text-slate-100 focus:outline-none focus:border-amber-500"
-              />
+              {!usePassword && (
+                <p className="text-[11px] text-slate-400 mt-1 pl-6">
+                  (Mặc định không đặt mật khẩu để bạn bè vào chơi hoặc xem tự do không bị chặn)
+                </p>
+              )}
             </div>
+
+            {usePassword && (
+              <div className="animate-fade-in pl-6">
+                <label className="text-[11px] font-bold text-amber-300 block mb-1">
+                  Mật khẩu phòng:
+                </label>
+                <input
+                  type="text"
+                  placeholder="Nhập mật khẩu (VD: 123456)"
+                  value={roomPassword}
+                  autoComplete="off"
+                  onChange={e => setRoomPassword(e.target.value)}
+                  className="w-full px-3.5 py-2 rounded-xl bg-slate-950 border border-slate-800 text-xs text-slate-100 focus:outline-none focus:border-amber-500 font-mono"
+                />
+              </div>
+            )}
             <button
               onClick={handleCreateRoom}
               className="w-full py-3.5 bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-400 hover:to-amber-500 text-black font-extrabold rounded-xl shadow-lg transition-all flex items-center justify-center gap-2 active:scale-95"

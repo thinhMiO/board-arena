@@ -91,6 +91,7 @@ export class RoomManager {
     if (!game) throw new Error(`Game [${gameId}] không tồn tại trên hệ thống`);
 
     const roomCode = this.generateRoomCode();
+    const cleanPassword = (typeof password === 'string' && password.trim().length > 0) ? password.trim() : null;
     
     // Parse timer
     let initialSecs = 600;
@@ -110,7 +111,7 @@ export class RoomManager {
       gameId,
       gameName: game.nameVi,
       isPrivate: !!isPrivate,
-      password: password || null,
+      password: cleanPassword,
       isRanked: !!isRanked,
       timerPreset,
       timer,
@@ -153,7 +154,8 @@ export class RoomManager {
     const room = this.rooms.get(roomCode);
     if (!room) throw new Error('Phòng chơi không tồn tại hoặc đã giải tán');
 
-    if (room.password && room.password !== password) {
+    const cleanPassword = (typeof password === 'string' && password.trim().length > 0) ? password.trim() : null;
+    if (room.password && room.password !== cleanPassword) {
       throw new Error('Mật khẩu phòng không đúng');
     }
 
@@ -440,6 +442,7 @@ export class RoomManager {
 
   sanitizeRoom(room) {
     const { password, ...safeRoom } = room;
+    safeRoom.hasPassword = !!(typeof room.password === 'string' && room.password.trim().length > 0);
     return safeRoom;
   }
 }

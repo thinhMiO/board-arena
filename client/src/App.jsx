@@ -176,6 +176,16 @@ export function App() {
           setCurrentTab('game');
           sound.playVictory();
         } else {
+          if (res.error?.includes('mật khẩu') || res.error?.includes('Mật khẩu')) {
+            const enteredPwd = prompt('🔒 Bàn này có đặt mật khẩu bảo vệ. Vui lòng nhập mật khẩu phòng:');
+            if (enteredPwd !== null && enteredPwd.trim().length > 0) {
+              handleStartMatch({
+                ...config,
+                password: enteredPwd.trim()
+              });
+              return;
+            }
+          }
           alert(res.error || 'Không thể tham gia phòng');
         }
       });
@@ -439,7 +449,10 @@ export function App() {
                       >
                         <div className="truncate">
                           <div className="flex items-center gap-1.5 mb-0.5">
-                            <span className="font-bold text-xs text-white truncate">{room.name}</span>
+                            <span className="font-bold text-xs text-white truncate flex items-center gap-1">
+                              <span>{room.name}</span>
+                              {room.hasPassword && <span title="Bàn có mật khẩu" className="text-amber-400 text-xs">🔒</span>}
+                            </span>
                             {isPlaying && (
                               <span className="shrink-0 flex items-center gap-1 text-[9px] font-black px-1.5 py-0.2 rounded bg-red-500/20 text-red-400 border border-red-500/30">
                                 <span className="w-1.5 h-1.5 rounded-full bg-red-500 animate-ping" />
