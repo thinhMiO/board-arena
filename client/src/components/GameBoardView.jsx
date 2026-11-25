@@ -562,6 +562,10 @@ export const GameBoardView = ({ matchConfig, user, onExitMatch, onUserUpdated })
         ? { displayName: `AI (${difficulty})`, avatar: null, rating: 1500 }
         : (matchConfig?.opponent || roomData?.players?.find(p => p.id !== user?.id) || { displayName: 'Đối Thủ', avatar: 'https://api.dicebear.com/7.x/avataaars/svg?seed=opponent', rating: 1500 }));
 
+  // Dynamically determine sides so bottom bar is always ME and top bar is always OPPONENT
+  const mySideIndex = isSpectator ? 0 : myPlayerIndex;
+  const oppSideIndex = isSpectator ? 1 : (1 - myPlayerIndex);
+
   // Precise Voice Status for Opponent and Myself
   const opponentVoice = voiceRoster.find(
     r => (player1?.id && (r.userId === player1.id || r.id === player1.id)) ||
@@ -752,14 +756,14 @@ export const GameBoardView = ({ matchConfig, user, onExitMatch, onUserUpdated })
                       className={`w-9 h-9 rounded-full border-2 transition-all ${
                         isOpponentSpeaking
                           ? 'border-emerald-400 ring-4 ring-emerald-400/60 shadow-[0_0_15px_rgba(52,211,153,0.8)] scale-105'
-                          : (gameState?.turn === 1 ? 'border-amber-400 ring-2 ring-amber-400/40' : 'border-slate-700')
+                          : (gameState?.turn === oppSideIndex ? 'border-amber-400 ring-2 ring-amber-400/40' : 'border-slate-700')
                       }`}
                     />
                   ) : (
                     <div className={`w-9 h-9 rounded-full bg-slate-800 border-2 flex items-center justify-center font-bold text-sm transition-all ${
                       isOpponentSpeaking
                         ? 'border-emerald-400 ring-4 ring-emerald-400/60 shadow-[0_0_15px_rgba(52,211,153,0.8)] scale-105'
-                        : (gameState?.turn === 1 ? 'border-amber-400 ring-2 ring-amber-400/40' : 'border-slate-700')
+                        : (gameState?.turn === oppSideIndex ? 'border-amber-400 ring-2 ring-amber-400/40' : 'border-slate-700')
                     }`}>
                       {player1.avatar || (mode === 'ai' ? '🤖' : '👤')}
                     </div>
@@ -774,7 +778,7 @@ export const GameBoardView = ({ matchConfig, user, onExitMatch, onUserUpdated })
                       {player1.displayName}
                     </span>
                     <span className="text-[10px] font-bold px-1.5 py-0.2 rounded bg-slate-800 text-slate-300 border border-slate-700">
-                      {getSideName(gameId, 1)}
+                      {getSideName(gameId, oppSideIndex)}
                     </span>
                     {/* Opponent Voice Status Indicator */}
                     {isOpponentVoiceConnected ? (
@@ -825,8 +829,8 @@ export const GameBoardView = ({ matchConfig, user, onExitMatch, onUserUpdated })
                 ⏳ Đang chờ...
               </span>
             ) : (
-              <div className={`px-3 py-1 rounded-lg font-mono font-bold text-sm ${gameState?.turn === 1 ? 'bg-amber-500 text-black animate-pulse-fast' : 'bg-slate-900 text-slate-300'}`}>
-                {formatTime(clocks[1] ?? clocks['1'])}
+              <div className={`px-3 py-1 rounded-lg font-mono font-bold text-sm ${gameState?.turn === oppSideIndex ? 'bg-amber-500 text-black animate-pulse-fast' : 'bg-slate-900 text-slate-300'}`}>
+                {formatTime(clocks[oppSideIndex] ?? clocks[String(oppSideIndex)])}
               </div>
             )}
           </div>
@@ -1087,7 +1091,7 @@ export const GameBoardView = ({ matchConfig, user, onExitMatch, onUserUpdated })
                   className={`w-9 h-9 rounded-full border-2 transition-all ${
                     isMySpeaking
                       ? 'border-emerald-400 ring-4 ring-emerald-400/60 shadow-[0_0_15px_rgba(52,211,153,0.8)] scale-105'
-                      : (gameState?.turn === 0 ? 'border-amber-400 ring-2 ring-amber-400/40' : 'border-slate-700')
+                      : (gameState?.turn === mySideIndex ? 'border-amber-400 ring-2 ring-amber-400/40' : 'border-slate-700')
                   }`}
                 />
                 {isMySpeaking && (
@@ -1098,7 +1102,7 @@ export const GameBoardView = ({ matchConfig, user, onExitMatch, onUserUpdated })
                 <div className="flex items-center gap-1.5 flex-wrap">
                   <span className="text-xs font-bold text-white">{player0.displayName}</span>
                   <span className="text-[10px] font-bold px-1.5 py-0.2 rounded bg-amber-500/20 text-amber-300 border border-amber-500/30">
-                    {getSideName(gameId, 0)}
+                    {getSideName(gameId, mySideIndex)}
                   </span>
                   {/* My Voice Status Indicator */}
                   {isMyVoiceConnected ? (
@@ -1146,8 +1150,8 @@ export const GameBoardView = ({ matchConfig, user, onExitMatch, onUserUpdated })
             </div>
 
             {/* User Clock */}
-            <div className={`px-3 py-1 rounded-lg font-mono font-bold text-sm ${gameState?.turn === 0 ? 'bg-amber-500 text-black animate-pulse-fast' : 'bg-slate-900 text-slate-300'}`}>
-              {formatTime(clocks[0] ?? clocks['0'])}
+            <div className={`px-3 py-1 rounded-lg font-mono font-bold text-sm ${gameState?.turn === mySideIndex ? 'bg-amber-500 text-black animate-pulse-fast' : 'bg-slate-900 text-slate-300'}`}>
+              {formatTime(clocks[mySideIndex] ?? clocks[String(mySideIndex)])}
             </div>
           </div>
         </div>

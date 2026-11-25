@@ -1,13 +1,46 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { sound } from '../../services/audio';
+import { RotateCcw } from 'lucide-react';
 
 const XIANGQI_PIECES = {
   0: { K: '帥', A: '仕', E: '相', H: '傌', R: '俥', C: '炮', P: '兵' }, // Red
   1: { K: '將', A: '士', E: '象', H: '馬', R: '車', C: '砲', P: '卒' }  // Black
 };
 
-export const XiangqiBoard = ({ gameState, onMove, gameEngine, isInteractive = true }) => {
+export const XiangqiBoard = ({ gameState, onMove, playerIndex = 0, gameEngine, isInteractive = true }) => {
   const [selectedSquare, setSelectedSquare] = useState(null);
+  const [isFlipped, setIsFlipped] = useState(playerIndex === 1);
+
+  const getBrowserPrefersDark = () => {
+    if (typeof window !== 'undefined' && window.matchMedia) {
+      return window.matchMedia('(prefers-color-scheme: dark)').matches;
+    }
+    return true;
+  };
+
+  const [systemIsDark, setSystemIsDark] = useState(getBrowserPrefersDark);
+  const [themeMode, setThemeMode] = useState(() => localStorage.getItem('xiangqi_theme_mode') || 'auto');
+
+  useEffect(() => {
+    if (typeof window === 'undefined' || !window.matchMedia) return;
+    const mediaQuery = window.matchMedia('(prefers-color-scheme: dark)');
+    const handler = e => setSystemIsDark(e.matches);
+    mediaQuery.addEventListener('change', handler);
+    return () => mediaQuery.removeEventListener('change', handler);
+  }, []);
+
+  useEffect(() => {
+    setIsFlipped(playerIndex === 1);
+  }, [playerIndex]);
+
+  const isDarkTheme = themeMode === 'auto' ? systemIsDark : themeMode === 'dark';
+
+  const toggleTheme = () => {
+    const nextMode = themeMode === 'auto' ? (systemIsDark ? 'wood' : 'dark') : (themeMode === 'dark' ? 'wood' : 'auto');
+    setThemeMode(nextMode);
+    localStorage.setItem('xiangqi_theme_mode', nextMode);
+  };
+
   const board = gameState.board;
 
   // Calculate all valid moves for current turn
@@ -53,19 +86,44 @@ export const XiangqiBoard = ({ gameState, onMove, gameEngine, isInteractive = tr
     }
   };
 
+  const displayRows = isFlipped ? [9, 8, 7, 6, 5, 4, 3, 2, 1, 0] : [0, 1, 2, 3, 4, 5, 6, 7, 8, 9];
+  const displayCols = isFlipped ? [8, 7, 6, 5, 4, 3, 2, 1, 0] : [0, 1, 2, 3, 4, 5, 6, 7, 8];
+
   return (
     <div className="flex flex-col items-center justify-center select-none w-full">
-      <div className="relative border-4 sm:border-8 border-[#5c3e21] rounded-2xl overflow-hidden shadow-2xl bg-[#e6b97e] p-1.5 sm:p-3 max-w-full">
+      {/* Board Controls Toolbar */}
+      <div className="w-[min(86vw,min(68vh,480px))] mb-1.5 flex items-center justify-between text-xs px-1">
+        <button
+          onClick={toggleTheme}
+          className={`px-2.5 py-1 rounded-xl border text-[11px] font-bold flex items-center gap-1.5 transition-all shadow ${
+            isDarkTheme ? 'bg-zinc-900 text-white border-zinc-700' : 'bg-amber-950 text-amber-300 border-amber-800'
+          }`}
+        >
+          <span>{themeMode === 'auto' ? `🖥️ Trình duyệt (${isDarkTheme ? 'Tối' : 'Sáng'})` : (isDarkTheme ? '🌙 Bàn Cờ Tối' : '🪵 Bàn Gỗ Cổ Điển')}</span>
+        </button>
+
+        <button
+          onClick={() => setIsFlipped(prev => !prev)}
+          className="px-2.5 py-1 rounded-xl bg-slate-900/90 hover:bg-slate-800 text-slate-300 hover:text-amber-300 font-bold text-[11px] border border-slate-800 shadow flex items-center gap-1.5 transition-all active:scale-95"
+        >
+          <RotateCcw className="w-3 h-3 text-amber-400" />
+          <span>{isFlipped ? 'Chiều: Quân Đen (將)' : 'Chiều: Quân Đỏ (帥)'}</span>
+        </button>
+      </div>
+
+      <div className={`relative border-4 sm:border-8 ${isDarkTheme ? 'border-[#0f172a] bg-[#090d16]' : 'border-[#5c3e21] bg-[#e6b97e]'} rounded-2xl overflow-hidden shadow-2xl p-1.5 sm:p-3 max-w-full transition-colors`}>
         {/* Board Outer Grid: 9 files x 10 ranks */}
         <div
           style={{
             width: 'min(86vw, min(68vh, 480px))',
             height: 'min(95vw, min(75vh, 530px))'
           }}
-          className="relative border-2 border-[#7a481c] bg-[#eed4ad]"
+          className={`relative border-2 ${isDarkTheme ? 'border-[#1e293b] bg-[#1e293b]' : 'border-[#7a481c] bg-[#eed4ad]'}`}
         >
           {/* River Banner */}
-          <div className="absolute top-[45%] left-0 right-0 h-[10%] flex items-center justify-around text-[#7a481c] font-bold text-xs sm:text-sm tracking-widest border-t-2 border-b-2 border-[#7a481c] bg-[#f2dfbe]">
+          <div className={`absolute top-[45%] left-0 right-0 h-[10%] flex items-center justify-around font-bold text-xs sm:text-sm tracking-widest border-t-2 border-b-2 ${
+            isDarkTheme ? 'text-slate-400 border-[#334155] bg-[#0f172a]' : 'text-[#7a481c] border-[#7a481c] bg-[#f2dfbe]'
+          }`}>
             <span>楚 河 (SỞ HÀ)</span>
             <span>漢 界 (HÁN GIỚI)</span>
           </div>
@@ -79,8 +137,9 @@ export const XiangqiBoard = ({ gameState, onMove, gameEngine, isInteractive = tr
             }}
             className="absolute inset-0"
           >
-            {board.map((row, r) =>
-              row.map((piece, c) => {
+            {displayRows.map(r =>
+              displayCols.map(c => {
+                const piece = board[r][c];
                 const sel = isSelected(r, c);
                 const isLastMove = gameState.lastMove &&
                   ((gameState.lastMove.from.r === r && gameState.lastMove.from.c === c) ||
