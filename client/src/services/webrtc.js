@@ -27,30 +27,15 @@ export class VoiceChatManager {
     this.audioCtx = null;
     this.animFrameId = null;
 
-    // Production STUN & Free Public TURN Servers for global NAT traversal
+    // Production Google & Cloudflare STUN servers for NAT & cross-network traversal
     this.rtcConfig = {
       iceServers: [
         { urls: 'stun:stun.l.google.com:19302' },
         { urls: 'stun:stun1.l.google.com:19302' },
         { urls: 'stun:stun2.l.google.com:19302' },
         { urls: 'stun:stun3.l.google.com:19302' },
-        { urls: 'stun:stun.cloudflare.com:3478' },
-        { urls: 'stun:openrelay.metered.ca:80' },
-        {
-          urls: 'turn:openrelay.metered.ca:80',
-          username: 'openrelayproject',
-          credential: 'openrelayproject'
-        },
-        {
-          urls: 'turn:openrelay.metered.ca:443',
-          username: 'openrelayproject',
-          credential: 'openrelayproject'
-        },
-        {
-          urls: 'turn:openrelay.metered.ca:443?transport=tcp',
-          username: 'openrelayproject',
-          credential: 'openrelayproject'
-        }
+        { urls: 'stun:stun4.l.google.com:19302' },
+        { urls: 'stun:stun.cloudflare.com:3478' }
       ],
       iceCandidatePoolSize: 10
     };
@@ -290,31 +275,49 @@ export class VoiceChatManager {
 
     // Remote audio track received
     pc.ontrack = event => {
+      console.log(`[WebRTC Voice] 🎵 Received remote audio track from peer ${peerId}:`, event.track);
+      const remoteStream = (event.streams && event.streams[0]) ? event.streams[0] : new MediaStream([event.track]);
+
+      // 1. Direct Web Audio API pipeline (bypasses browser autoplay blocks on all devices!)
+      try {
+        const AudioCtx = window.AudioContext || window.webkitAudioContext;
+        if (!this.audioCtx || this.audioCtx.state === 'closed') {
+          this.audioCtx = new AudioCtx();
+        }
+        if (this.audioCtx.state === 'suspended') {
+          this.audioCtx.resume();
+        }
+        const source = this.audioCtx.createMediaStreamSource(remoteStream);
+        const gainNode = this.audioCtx.createGain();
+        gainNode.gain.value = 1.3; // 30% boost for clear, loud voice
+        source.connect(gainNode);
+        gainNode.connect(this.audioCtx.destination);
+        console.log(`[WebRTC Voice] 🔊 Direct AudioContext connected for peer ${peerId}`);
+      } catch (err) {
+        console.warn('[WebRTC Voice] Direct AudioContext routing note:', err);
+      }
+
+      // 2. HTML Audio element as simultaneous fallback
       let audio = this.audioElements.get(peerId);
       if (!audio) {
-        audio = document.createElement('audio');
+        audio = new Audio();
         audio.autoplay = true;
         audio.playsInline = true;
         audio.setAttribute('playsinline', 'true');
-        audio.style.position = 'fixed';
-        audio.style.top = '-9999px';
-        audio.style.left = '-9999px';
-        audio.style.width = '1px';
-        audio.style.height = '1px';
-        audio.style.opacity = '0.01';
+        audio.muted = false;
+        audio.volume = 1.0;
         document.body.appendChild(audio);
         this.audioElements.set(peerId, audio);
       }
 
-      audio.srcObject = event.streams[0];
+      audio.srcObject = remoteStream;
       audio.muted = this.isDeafened;
       audio.volume = 1.0;
 
-      // Handle mobile autoplay restrictions
       const playPromise = audio.play();
       if (playPromise !== undefined) {
         playPromise.catch(e => {
-          console.warn('[WebRTC Voice] Audio playback blocked by browser, unlocking on user tap:', e);
+          console.warn('[WebRTC Voice] HTML Audio autoplay prompt:', e.message);
           const unlock = () => {
             audio.play().catch(() => {});
             document.removeEventListener('click', unlock);
@@ -326,8 +329,12 @@ export class VoiceChatManager {
       }
     };
 
+    pc.oniceconnectionstatechange = () => {
+      console.log(`[WebRTC Voice] Peer ${peerId} ICE Connection:`, pc.iceConnectionState);
+    };
+
     pc.onconnectionstatechange = () => {
-      console.log(`[WebRTC Voice] Peer ${peerId} connection state:`, pc.connectionState);
+      console.log(`[WebRTC Voice] Peer ${peerId} Connection State:`, pc.connectionState);
     };
 
     return pc;
@@ -391,12 +398,26 @@ export class VoiceChatManager {
     try {
       this.socketService.emit('voice:leave', { roomCode: this.roomCode });
     } catch {}
+
+    const s = this.socketService.getSocket();
+    if (s) {
+      s.off('voice:roster');
+      s.off('voice:peer_joined');
+      s.off('voice:offer');
+      s.off('voice:answer');
+      s.off('voice:ice-candidate');
+      s.off('voice:user_state');
+      s.off('voice:peer_left');
+    }
+
     if (this.animFrameId) cancelAnimationFrame(this.animFrameId);
     if (this.audioCtx) {
       try { this.audioCtx.close(); } catch {}
+      this.audioCtx = null;
     }
     if (this.localStream) {
       this.localStream.getTracks().forEach(t => t.stop());
+      this.localStream = null;
     }
     this.peers.forEach(pc => pc.close());
     this.peers.clear();
