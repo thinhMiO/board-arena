@@ -292,15 +292,45 @@ io.on('connection', socket => {
   // Room joining (support role: 'spectator' for direct spectating)
   socket.on('room:join', ({ roomCode, password, user, role }, callback) => {
     try {
+      const code = (roomCode || '').trim().toUpperCase();
       const playerUser = currentUser || user;
       if (!currentUser && playerUser) {
         currentUser = playerUser;
       }
       const forceSpectate = role === 'spectator';
-      const { room, role: actualRole, playerIndex } = roomManager.joinRoom(roomCode, playerUser, socket, password, forceSpectate);
-      currentRoomCode = roomCode;
+      const { room, role: actualRole, playerIndex } = roomManager.joinRoom(code, playerUser, socket, password, forceSpectate);
+      currentRoomCode = code;
       if (typeof callback === 'function') {
         callback({ success: true, room: roomManager.sanitizeRoom(room), role: actualRole, playerIndex });
+      }
+    } catch (err) {
+      if (typeof callback === 'function') callback({ success: false, error: err.message });
+    }
+  });
+
+  // Room state synchronization (guarantees both players are in sync even after network hiccups)
+  socket.on('room:sync', ({ roomCode, user }, callback) => {
+    try {
+      const code = (roomCode || '').trim().toUpperCase();
+      const room = roomManager.getRoom(code);
+      if (!room) {
+        if (typeof callback === 'function') callback({ success: false, error: 'Phòng không tồn tại' });
+        return;
+      }
+      socket.join(code);
+      currentRoomCode = code;
+      const u = user || currentUser;
+      let playerIndex = -1;
+      if (u?.id) {
+        playerIndex = room.players.findIndex(p => p.id === u.id);
+      }
+      if (typeof callback === 'function') {
+        callback({
+          success: true,
+          room: roomManager.sanitizeRoom(room),
+          playerIndex,
+          status: room.status
+        });
       }
     } catch (err) {
       if (typeof callback === 'function') callback({ success: false, error: err.message });
@@ -364,8 +394,9 @@ io.on('connection', socket => {
 
   // Voice Chat Signaling (WebRTC)
   socket.on('voice:join', ({ roomCode, user }) => {
-    socket.join(`voice_${roomCode}`);
-    const room = roomManager.getRoom(roomCode);
+    const code = (roomCode || '').trim().toUpperCase();
+    socket.join(`voice_${code}`);
+    const room = roomManager.getRoom(code);
     if (room) {
       room.voiceUsers.set(socket.id, {
         userId: user?.id || socket.id,
@@ -375,13 +406,23 @@ io.on('connection', socket => {
         speaking: false
       });
       // Notify other voice peers in room to initiate WebRTC offers
-      socket.to(`voice_${roomCode}`).emit('voice:peer_joined', {
+      socket.to(`voice_${code}`).emit('voice:peer_joined', {
         peerId: socket.id,
         user
       });
       // Send current voice room members to the newcomer
       const peers = Array.from(room.voiceUsers.entries()).map(([peerId, data]) => ({ peerId, ...data }));
       socket.emit('voice:roster', peers);
+    }
+  });
+
+  socket.on('voice:leave', ({ roomCode }) => {
+    const code = (roomCode || '').trim().toUpperCase();
+    socket.leave(`voice_${code}`);
+    const room = roomManager.getRoom(code);
+    if (room && room.voiceUsers.has(socket.id)) {
+      room.voiceUsers.delete(socket.id);
+      io.to(`voice_${code}`).emit('voice:peer_left', { peerId: socket.id });
     }
   });
 
@@ -407,12 +448,13 @@ io.on('connection', socket => {
   });
 
   socket.on('voice:state_change', ({ roomCode, muted, speaking }) => {
-    const room = roomManager.getRoom(roomCode);
+    const code = (roomCode || '').trim().toUpperCase();
+    const room = roomManager.getRoom(code);
     if (room && room.voiceUsers.has(socket.id)) {
       const v = room.voiceUsers.get(socket.id);
       if (muted !== undefined) v.muted = muted;
       if (speaking !== undefined) v.speaking = speaking;
-      io.to(`voice_${roomCode}`).emit('voice:user_state', {
+      io.to(`voice_${code}`).emit('voice:user_state', {
         peerId: socket.id,
         userId: v.userId,
         muted: v.muted,

@@ -209,10 +209,30 @@ export const GameBoardView = ({ matchConfig, user, onExitMatch, onUserUpdated })
     return () => clearInterval(interval);
   }, [mode, roomData?.status, clockRunning, gameState?.turn, gameState?.gameOver, isWaitingForOpponent]);
 
-  // Socket room listeners
+  // Socket room listeners & Auto-sync
   useEffect(() => {
     if (mode === 'online' && roomCode) {
       const s = socketService.getSocket();
+
+      // Immediately sync with server on mount & re-subscribe socket to room
+      s.emit('room:sync', { roomCode, user }, res => {
+        if (res?.success && res.room) {
+          setRoomData(res.room);
+          if (res.room.spectators) setSpectators(res.room.spectators);
+          if (res.playerIndex !== undefined && res.playerIndex >= 0) {
+            setMyPlayerIndex(res.playerIndex);
+          }
+          if (res.room.status === 'playing') {
+            setClockRunning(true);
+            if (res.room.gameState) setGameState(res.room.gameState);
+            if (res.room.timer) {
+              const incoming = res.room.timer.times || res.room.timer.clocks;
+              if (incoming) setClocks(incoming);
+            }
+          }
+        }
+      });
+
       s.on('game:move_made', ({ move, notation, playerIndex, gameState: newGs, timer }) => {
         setGameState(newGs);
         if (timer) {
@@ -228,7 +248,7 @@ export const GameBoardView = ({ matchConfig, user, onExitMatch, onUserUpdated })
         }
       });
 
-      s.on('game:started', ({ gameState: startGs, timer }) => {
+      s.on('game:started', ({ gameState: startGs, timer, room: startedRoom }) => {
         setGameState(startGs);
         if (timer) {
           const incoming = timer.times || timer.clocks;
@@ -236,6 +256,11 @@ export const GameBoardView = ({ matchConfig, user, onExitMatch, onUserUpdated })
         }
         setClockRunning(true);
         setMoveHistory([]);
+        if (startedRoom) {
+          setRoomData(startedRoom);
+        } else {
+          setRoomData(prev => prev ? { ...prev, status: 'playing' } : null);
+        }
         sound.playVictory();
       });
 
@@ -290,6 +315,29 @@ export const GameBoardView = ({ matchConfig, user, onExitMatch, onUserUpdated })
     }
   }, [mode, roomCode]);
 
+  // Active polling fallback while waiting for opponent (checks every 1.5s to guarantee instant start)
+  useEffect(() => {
+    if (!isWaitingForOpponent || mode !== 'online' || !roomCode) return;
+    const interval = setInterval(() => {
+      const s = socketService.getSocket();
+      s.emit('room:sync', { roomCode, user }, res => {
+        if (res?.success && res.room) {
+          if (res.room.status === 'playing' || (res.room.players && res.room.players.length >= 2)) {
+            setRoomData(res.room);
+            if (res.room.spectators) setSpectators(res.room.spectators);
+            if (res.room.gameState) setGameState(res.room.gameState);
+            setClockRunning(true);
+            if (res.room.timer) {
+              const incoming = res.room.timer.times || res.room.timer.clocks;
+              if (incoming) setClocks(incoming);
+            }
+          }
+        }
+      });
+    }, 1500);
+    return () => clearInterval(interval);
+  }, [isWaitingForOpponent, mode, roomCode, user?.id]);
+
   // Voice Chat initialization for Online rooms
   const handleToggleVoice = async () => {
     if (!voiceManager) {
@@ -307,6 +355,7 @@ export const GameBoardView = ({ matchConfig, user, onExitMatch, onUserUpdated })
         };
         setVoiceManager(vm);
         setIsVoiceActive(true);
+        setIsMicMuted(false);
       } else {
         alert(res.error);
       }
@@ -314,6 +363,15 @@ export const GameBoardView = ({ matchConfig, user, onExitMatch, onUserUpdated })
       voiceManager.destroy();
       setVoiceManager(null);
       setIsVoiceActive(false);
+      setVoiceRoster([]);
+      setActiveSpeakers(new Set());
+    }
+  };
+
+  const handleToggleMute = () => {
+    if (voiceManager) {
+      const muted = voiceManager.toggleMute();
+      setIsMicMuted(muted);
     }
   };
 
@@ -610,6 +668,63 @@ export const GameBoardView = ({ matchConfig, user, onExitMatch, onUserUpdated })
         {/* Left / Center: Players and Board (8 Cols on Desktop) */}
         <div className="lg:col-span-8 flex flex-col items-center">
           
+          {/* Live Voice Chat Bar for Online Match */}
+          {mode === 'online' && !isSpectator && (
+            <div className="w-[min(86vw,min(68vh,500px))] mb-2 px-3 py-1.5 rounded-xl glass-panel border border-emerald-500/30 flex items-center justify-between shadow-md bg-slate-900/90 transition-all">
+              <div className="flex items-center gap-2">
+                <span className="relative flex h-2.5 w-2.5">
+                  {isVoiceActive ? (
+                    <>
+                      <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />
+                      <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-emerald-500" />
+                    </>
+                  ) : (
+                    <span className="relative inline-flex rounded-full h-2.5 w-2.5 bg-slate-600" />
+                  )}
+                </span>
+                <span className="text-[11px] font-bold text-slate-200 flex items-center gap-1.5">
+                  <span>Mic Đàm Thoại:</span>
+                  <strong className={isVoiceActive ? (isMicMuted ? 'text-amber-400' : 'text-emerald-400') : 'text-slate-400'}>
+                    {isVoiceActive ? (isMicMuted ? 'Đã Tắt Mic' : 'Đang Bật Mic 🎙️') : 'Chưa Bật'}
+                  </strong>
+                </span>
+              </div>
+
+              <div className="flex items-center gap-1.5">
+                {!isVoiceActive ? (
+                  <button
+                    onClick={handleToggleVoice}
+                    className="px-3 py-1 rounded-lg bg-gradient-to-r from-emerald-500 to-green-500 hover:from-emerald-400 hover:to-green-400 text-black font-extrabold text-[11px] shadow flex items-center gap-1 active:scale-95 transition-all"
+                  >
+                    <Mic className="w-3.5 h-3.5 fill-black" />
+                    <span>Bật Mic Trực Tiếp</span>
+                  </button>
+                ) : (
+                  <>
+                    <button
+                      onClick={handleToggleMute}
+                      className={`px-2 py-1 rounded-lg text-[10px] font-bold flex items-center gap-1 border transition-all ${
+                        isMicMuted
+                          ? 'bg-amber-500/20 text-amber-300 border-amber-500/40 hover:bg-amber-500/30'
+                          : 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40 hover:bg-emerald-500/30'
+                      }`}
+                    >
+                      {isMicMuted ? <MicOff className="w-3 h-3 text-amber-400" /> : <Mic className="w-3 h-3 text-emerald-400" />}
+                      <span>{isMicMuted ? 'Mở Mic' : 'Tắt Mic'}</span>
+                    </button>
+                    <button
+                      onClick={handleToggleVoice}
+                      className="px-2 py-1 rounded-lg text-[10px] font-bold text-slate-400 hover:text-red-400 border border-slate-700 bg-slate-800/80 transition-all"
+                      title="Tắt cuộc gọi voice"
+                    >
+                      Tắt Voice
+                    </button>
+                  </>
+                )}
+              </div>
+            </div>
+          )}
+
           {/* Opponent Player Bar (or Waiting State / Player 1 for Spectator) */}
           <div className="w-[min(86vw,min(68vh,500px))] flex items-center justify-between glass-panel px-3.5 py-1.5 sm:py-2 rounded-xl mb-2 shadow-lg">
             {isWaitingForOpponent ? (

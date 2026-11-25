@@ -280,9 +280,10 @@ export class VoiceChatManager {
     // ICE Candidate generation
     pc.onicecandidate = event => {
       if (event.candidate) {
+        const candJson = event.candidate.toJSON ? event.candidate.toJSON() : event.candidate;
         this.socketService.emit('voice:ice-candidate', {
           toPeerId: peerId,
-          candidate: event.candidate
+          candidate: candJson
         });
       }
     };
@@ -295,25 +296,34 @@ export class VoiceChatManager {
         audio.autoplay = true;
         audio.playsInline = true;
         audio.setAttribute('playsinline', 'true');
-        audio.style.display = 'none';
+        audio.style.position = 'fixed';
+        audio.style.top = '-9999px';
+        audio.style.left = '-9999px';
+        audio.style.width = '1px';
+        audio.style.height = '1px';
+        audio.style.opacity = '0.01';
         document.body.appendChild(audio);
         this.audioElements.set(peerId, audio);
       }
 
       audio.srcObject = event.streams[0];
       audio.muted = this.isDeafened;
+      audio.volume = 1.0;
 
       // Handle mobile autoplay restrictions
-      audio.play().catch(e => {
-        console.warn('[WebRTC Voice] Audio playback blocked by browser, unlocking on user tap:', e);
-        const unlock = () => {
-          audio.play();
-          document.removeEventListener('click', unlock);
-          document.removeEventListener('touchstart', unlock);
-        };
-        document.addEventListener('click', unlock, { once: true });
-        document.addEventListener('touchstart', unlock, { once: true });
-      });
+      const playPromise = audio.play();
+      if (playPromise !== undefined) {
+        playPromise.catch(e => {
+          console.warn('[WebRTC Voice] Audio playback blocked by browser, unlocking on user tap:', e);
+          const unlock = () => {
+            audio.play().catch(() => {});
+            document.removeEventListener('click', unlock);
+            document.removeEventListener('touchstart', unlock);
+          };
+          document.addEventListener('click', unlock, { once: true });
+          document.addEventListener('touchstart', unlock, { once: true });
+        });
+      }
     };
 
     pc.onconnectionstatechange = () => {
@@ -378,6 +388,9 @@ export class VoiceChatManager {
   }
 
   destroy() {
+    try {
+      this.socketService.emit('voice:leave', { roomCode: this.roomCode });
+    } catch {}
     if (this.animFrameId) cancelAnimationFrame(this.animFrameId);
     if (this.audioCtx) {
       try { this.audioCtx.close(); } catch {}

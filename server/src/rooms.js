@@ -148,11 +148,13 @@ export class RoomManager {
   }
 
   getRoom(roomCode) {
-    return this.rooms.get(roomCode);
+    const code = (roomCode || '').trim().toUpperCase();
+    return this.rooms.get(code);
   }
 
   joinRoom(roomCode, user, socket, password = null, forceSpectate = false) {
-    const room = this.rooms.get(roomCode);
+    const code = (roomCode || '').trim().toUpperCase();
+    const room = this.rooms.get(code);
     if (!room) throw new Error('Phòng chơi không tồn tại hoặc đã giải tán');
 
     const cleanPassword = (typeof password === 'string' && password.trim().length > 0) ? password.trim() : null;
@@ -161,12 +163,33 @@ export class RoomManager {
     }
 
     const game = GameRegistry.get(room.gameId);
-    const existingPlayer = room.players.find(p => p.id === user.id);
+    const existingPlayerIndex = room.players.findIndex(p => p.id === user.id);
 
-    if (existingPlayer && !forceSpectate) {
+    if (existingPlayerIndex !== -1 && !forceSpectate) {
+      // If room is still waiting for 2nd player, and another tab/device connects with the same account (very common in testing!)
+      if (room.status === 'waiting' && room.players.length < (game.maxPlayers || 2)) {
+        const colorIndex = room.players.length;
+        const playerObj = {
+          id: `${user.id}_player${colorIndex + 1}`,
+          username: user.username,
+          displayName: `${user.displayName || 'Người chơi'} (Tab 2)`,
+          avatar: user.avatar,
+          rating: (user.ratings && user.ratings[room.gameId]) || 1500,
+          ready: false,
+          colorIndex,
+          socketId: socket.id
+        };
+        room.players.push(playerObj);
+        socket.join(code);
+
+        this.broadcastSystemMessage(code, `${playerObj.displayName} đã tham gia phòng với vai trò Người chơi ${colorIndex + 1}.`);
+        this.startGame(code);
+        return { room: this.sanitizeRoom(room), role: 'player', playerIndex: colorIndex };
+      }
+
       // Reconnecting player
-      socket.join(roomCode);
-      return { room, role: 'player', playerIndex: existingPlayer.colorIndex };
+      socket.join(code);
+      return { room: this.sanitizeRoom(room), role: 'player', playerIndex: room.players[existingPlayerIndex].colorIndex };
     }
 
     // Check if seats are available and not force-spectating
@@ -179,20 +202,22 @@ export class RoomManager {
         avatar: user.avatar,
         rating: (user.ratings && user.ratings[room.gameId]) || 1500,
         ready: false,
-        colorIndex
+        colorIndex,
+        socketId: socket.id
       };
       room.players.push(playerObj);
-      socket.join(roomCode);
+      socket.join(code);
 
-      this.broadcastSystemMessage(roomCode, `${user.displayName} đã tham gia phòng với vai trò Người chơi.`);
-      this.io.to(roomCode).emit('room:updated', this.sanitizeRoom(room));
+      this.broadcastSystemMessage(code, `${user.displayName} đã tham gia phòng với vai trò Người chơi.`);
 
       // Auto start if room is full
       if (room.players.length === (game.maxPlayers || 2)) {
-        this.startGame(roomCode);
+        this.startGame(code);
+      } else {
+        this.io.to(code).emit('room:updated', this.sanitizeRoom(room));
       }
 
-      return { room, role: 'player', playerIndex: colorIndex };
+      return { room: this.sanitizeRoom(room), role: 'player', playerIndex: colorIndex };
     }
 
     // Otherwise join as spectator
@@ -205,15 +230,15 @@ export class RoomManager {
         joinedAt: Date.now()
       });
     }
-    socket.join(roomCode);
+    socket.join(code);
 
-    this.broadcastSystemMessage(roomCode, `👁️ ${user.displayName} đã vào khán đài theo dõi trận đấu.`);
-    this.io.to(roomCode).emit('spectators:updated', {
+    this.broadcastSystemMessage(code, `👁️ ${user.displayName} đã vào khán đài theo dõi trận đấu.`);
+    this.io.to(code).emit('spectators:updated', {
       count: room.spectators.length,
       spectators: room.spectators
     });
-    this.io.to(roomCode).emit('room:updated', this.sanitizeRoom(room));
-    return { room, role: 'spectator', playerIndex: -1 };
+    this.io.to(code).emit('room:updated', this.sanitizeRoom(room));
+    return { room: this.sanitizeRoom(room), role: 'spectator', playerIndex: -1 };
   }
 
   leaveRoom(roomCode, userId) {
@@ -357,11 +382,14 @@ export class RoomManager {
     room.gameState = game.init({});
 
     this.broadcastSystemMessage(roomCode, '⚔️ Trận đấu chính thức bắt đầu!');
+    const sanitized = this.sanitizeRoom(room);
     this.io.to(roomCode).emit('game:started', {
       gameState: room.gameState,
       timer: this.getTimerSnapshot(room.timer),
-      status: room.status
+      status: room.status,
+      room: sanitized
     });
+    this.io.to(roomCode).emit('room:updated', sanitized);
   }
 
   handleMove(roomCode, move, userId) {

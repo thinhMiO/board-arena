@@ -197,7 +197,7 @@ export function App() {
           sound.playVictory();
         } else {
           if (res.error?.includes('mật khẩu') || res.error?.includes('Mật khẩu')) {
-            const enteredPwd = prompt('🔒 Bàn này có đặt mật khẩu bảo vệ. Vui lòng nhập mật khẩu phòng:');
+            const enteredPwd = prompt('🔒 Bàn này có đặt mật khẩu bảo vệ. Vui lòng nhập đúng mật khẩu phòng:');
             if (enteredPwd !== null && enteredPwd.trim().length > 0) {
               handleStartMatch({
                 ...config,
@@ -205,6 +205,8 @@ export function App() {
               });
               return;
             }
+            // Người dùng bấm Hủy (Cancel) hoặc không nhập: dừng lại, không hiện alert lỗi khó chịu
+            return;
           }
           alert(res.error || 'Không thể tham gia phòng');
         }
@@ -498,7 +500,19 @@ export function App() {
                         ) : (
                           <div className="flex items-center gap-1.5 shrink-0">
                             <button
-                              onClick={() => handleStartMatch({ mode: 'join_room', roomCode: room.code, gameId: room.gameId })}
+                              onClick={() => {
+                                if (room.hasPassword) {
+                                  const pwd = prompt(`🔒 Bàn "${room.name}" có cài mật khẩu bảo vệ. Vui lòng nhập mật khẩu:`);
+                                  if (pwd === null) return;
+                                  if (!pwd.trim()) {
+                                    alert('Vui lòng nhập mật khẩu để vào bàn!');
+                                    return;
+                                  }
+                                  handleStartMatch({ mode: 'join_room', roomCode: room.code, gameId: room.gameId, password: pwd.trim() });
+                                } else {
+                                  handleStartMatch({ mode: 'join_room', roomCode: room.code, gameId: room.gameId });
+                                }
+                              }}
                               className="px-3 py-1.5 rounded-xl bg-amber-500 hover:bg-amber-400 text-black font-extrabold text-xs transition-all shadow"
                             >
                               Tham Gia
